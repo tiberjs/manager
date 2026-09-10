@@ -1,7 +1,7 @@
 {
   "name": "@tiberjs/manager",
   "version": "0.1.0",
-  "description": "Durable DAG scheduling, persistence, retries, cancellation, and recovery on TiberJS Runner.",
+  "description": "Durable Runner job wrapping with dynamic checkpoints, retries, cancellation, and recovery.",
   "author": "miinhho",
   "repository": {
     "type": "git",
@@ -46,7 +46,7 @@
     "vitest": "^5.0.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "packageManager": "pnpm@12.3.4"
 }

@@ -1,25 +1,10 @@
 # @tiberjs/manager
 
-`@tiberjs/manager` runs explicit durable DAGs on `@tiberjs/runner`.
+Durable job management around `@tiberjs/runner`, with optional dynamic checkpoints. No graph declaration or workflow base class is required.
 
-Manager owns persisted graph state, dependency scheduling, retries, cancellation, and lease recovery. Runner executes each node attempt and owns its process-local child tasks, dependency-injection scope, cancellation signal, and cleanup.
+Manager persists logical job identity, input, result, retries, cancellation, leases, and checkpoint records. Each attempt reconstructs the registered handler inside a fresh Runner execution. Runner owns DI, child tasks, cancellation signals, and cleanup.
 
-Arbitrary promises and `await` expressions are not checkpoints. A completed DAG node is the durable boundary.
-
-The implementation keeps these ownership boundaries explicit:
-
-```text
-Manager facade
-→ WorkflowRegistry
-→ DurableWorker
-   → NodeActivationRunner
-      → Runner node attempt
-
-MemoryStore
-→ pure execution-state transitions
-```
-
-`Manager` does not implement scheduling or node execution. `MemoryStore` owns in-memory isolation and atomic replacement, while `execution/state.ts` owns the transport-independent state machine.
+**MemoryStore does not survive process restart.** It is the clone-isolated reference adapter. Production durability requires an `ExecutionStore` backed by durable storage; this package does not yet ship one.
 
 ## Installation
 
@@ -27,83 +12,45 @@ MemoryStore
 pnpm add @tiberjs/manager @tiberjs/runner
 ```
 
-Node.js 20 or newer is required.
+Use Node.js 24 or newer.
 
-## Define a workflow
-
-A workflow is a pure graph declaration. `build()` receives a symbolic input reference and returns the output node reference; it does not execute handlers.
+## Wrap a Runner handler
 
 ```ts
-import {
-  DurableGraph,
-  MemoryStore,
-  Workflow,
-  createManager,
-  type NodeRef,
-  type WorkflowInput,
-} from "@tiberjs/manager";
+import { forkGroup } from "@tiberjs/runner";
+import { Job, MemoryStore, createManager } from "@tiberjs/manager";
 
-interface ResearchInput {
-  query: string;
-}
-
-class SearchWeb {
-  async run(input: ResearchInput): Promise<string[]> {
-    return searchWeb(input.query);
+@Job({ name: "research:v1", retry: { retries: 3, delayMs: 250 } })
+class Research {
+  async run(input: { query: string }): Promise<string> {
+    const results = await forkGroup(
+      () => Promise.resolve(`web:${input.query}`),
+      () => Promise.resolve(`papers:${input.query}`),
+    );
+    return results.join("\n");
   }
 }
 
-class SearchPapers {
-  async run(input: ResearchInput): Promise<string[]> {
-    return searchPapers(input.query);
-  }
-}
-
-class Summarize {
-  async run(input: { web: string[]; papers: string[] }): Promise<string> {
-    return summarize([...input.web, ...input.papers]);
-  }
-}
-
-@Workflow({
-  name: "research",
-  retry: { retries: 3, delayMs: 250, backoff: 2, maxDelayMs: 10_000 },
-})
-class Research extends DurableGraph<ResearchInput, string> {
-  build(input: WorkflowInput<ResearchInput>): NodeRef<string> {
-    const web = this.step("web", SearchWeb, input);
-    const papers = this.step("papers", SearchPapers, input);
-    return this.step("summary", Summarize, { web, papers });
-  }
-}
-```
-
-Dependencies are inferred from `NodeRef` values nested in a node's input. `web` and `papers` are ready together; `summary` becomes ready only after both complete. Step IDs are durable identities and must remain stable across deployments while unfinished executions exist.
-
-Registration rejects duplicate step IDs, references from another graph, invalid outputs, and disconnected nodes.
-
-Registration snapshots retry options and plain object/array step bindings. Mutating declaration objects afterward does not change the compiled workflow.
-
-## Run and resume
-
-```ts
-await using manager = createManager({
-  store: new MemoryStore(),
-  concurrency: 8,
-});
-
-manager.register(Research);
-
-const execution = manager.run(
-  Research,
-  { query: "structured concurrency" },
-  { key: "research:42" },
-);
-
+await using manager = createManager({ store: new MemoryStore(), concurrency: 8 });
+const research = manager.wrap(Research); // registers code without constructing the handler
+const execution = research.run({ query: "structured concurrency" }, { key: "research:42" });
 const report = await execution;
+const sameReport = await research.get(execution.id);
 ```
 
-`Execution<T>` is `PromiseLike<T>` and exposes:
+`@Job` is a standard TC39 class decorator. Classes need only a `run(input)` method; input and awaited output types are inferred. Parameterless handlers receive `undefined` through `run(undefined)`.
+
+Compile decorators before running on Node (for example, TypeScript with `target: "ES2023"` and `module: "NodeNext"`). Node 24 does not execute decorator syntax directly; do not enable legacy `experimentalDecorators`.
+
+The wrapper persists a stable job name and serializable input, not a function or closure. Each worker must register the same handler code to recover that name. Constructors and Runner DI execute only inside an attempt.
+
+`manager.register(...types)`, `manager.run(Type, input, options)`, and `manager.get(Type, id)` expose the equivalent unbound operations. Batch registration validates every definition before admitting any of them. `wrap(Type)` registers one type and returns typed `run()`/`get()` methods.
+
+## Execution handles
+
+`Execution<T>` is `PromiseLike<T>`, not a `Promise`:
+
+Admission failures (such as a missing execution in `get()`) are retained by the handle without an unhandled promise rejection. They surface when you await the handle or call `status()`/`cancel()`.
 
 ```ts
 interface Execution<T> extends PromiseLike<T> {
@@ -113,116 +60,123 @@ interface Execution<T> extends PromiseLike<T> {
 }
 ```
 
-Use `get()` to join a persisted execution after registering its workflow:
+An execution key is scoped to the job name. Equal name/key/input joins the existing execution; different input raises `ExecutionIdentityConflictError`. Input is snapshotted at submission. Identity compares its serialized representation, not semantic equality of arbitrary objects; retain stable field ordering and input schemas.
+
+A worker claims only registered jobs. `run()` starts the local worker unless `autoStart: false`; use `manager.start()` for dedicated recovery workers. `get()` joins a stored execution but does not start a worker itself.
+
+## Optional dynamic checkpoints
+
+Without checkpoints, retry starts the **entire handler** again. Checkpoints memoize completed effects as the handler runs, including effects selected by ordinary branches and loops.
 
 ```ts
-const resumed = manager.get(Research, executionId);
-const report = await resumed;
-```
+import { inject } from "@tiberjs/runner";
+import { DurableExecution, Job } from "@tiberjs/manager";
 
-Workers only claim nodes for workflows registered in that process. `run()` starts the worker automatically unless `autoStart` is `false`; call `start()` explicitly in dedicated worker processes.
+@Job({ name: "accumulator:v1", retry: { retries: 2 } })
+class Accumulator {
+  readonly durable = inject(DurableExecution);
 
-## Node attempts use Runner
-
-Every claimed node runs inside `runner.execute()` with a fresh resource scope. Handler classes can use Runner's ambient DI and structured-concurrency APIs:
-
-```ts
-import { fork, inject, onDispose, signal, token } from "@tiberjs/runner";
-import { currentExecution } from "@tiberjs/manager";
-
-const Database = token<DatabaseClient>("database");
-
-class PersistReport {
-  private readonly database = inject(Database);
-
-  constructor() {
-    onDispose(() => this.database.release());
-  }
-
-  async run(report: string): Promise<string> {
-    const { executionId, nodeId, attempt } = currentExecution();
-
-    fork(async () => audit({ executionId, nodeId, attempt }));
-    await this.database.put(report, { signal: signal() });
-    return report;
+  async run(input: { turns: number }): Promise<number> {
+    let total = 0;
+    for (let turn = 0; turn < input.turns; turn += 1) {
+      const plan = await this.durable.checkpoint(`plan:${turn}`, { turn, total }, () => ({
+        tool: "add",
+        amount: turn + 1,
+      }));
+      total = await this.durable.checkpoint(
+        `tool:${turn}:${plan.tool}`,
+        { total, plan },
+        () => total + plan.amount,
+      );
+    }
+    return total;
   }
 }
-
-manager.provide(Database, () => createDatabaseClient());
 ```
 
-A node is not durably complete until its handler returns and Runner has joined its child tasks. The attempt scope is then disposed before Manager persists the result. Cancellation aborts Runner's signal and remains cooperative: pass `signal()` to cancellable APIs and check it around irreversible work.
-
-If handler execution and scope disposal both fail, Manager preserves both failures in the durable `SerializedError.errors` list.
-
-## Retry and recovery
-
-Retry policy can be set at four levels. Higher levels replace only the fields they specify:
-
-```text
-manager default
-  < workflow @Workflow(...)
-  < node this.step(..., { retry })
-  < execution manager.run(..., { retry })
-```
-
-`retries: 3` means one initial attempt plus at most three retries. A failed node retries independently; completed upstream nodes and their results remain persisted. Exhausting a node's retries fails the execution and cancels unfinished sibling/downstream nodes.
-
-A claim has both a worker ID and a unique activation ID. Heartbeats renew its lease. Completion, failure, release, and cancellation acknowledgement are fenced by that activation ID, so a stale worker cannot overwrite a newer attempt.
-
-After a worker disappears:
-
-```text
-lease expires
-→ store recovers the running node
-→ node becomes ready at its retry time
-→ another registered worker claims a new attempt
-→ completed nodes are not rerun
-```
-
-Execution is at least once. A worker can perform an external side effect and die before persisting node completion. Make side effects idempotent or commit them transactionally with the backing store.
-
-## Stable execution keys
-
-A key is scoped to the workflow name and produces a stable execution ID.
+For an agent, the plan operation is a model call and the tool operation performs the selected external action. The example uses local computations to remain runnable without a provider.
 
 ```ts
-const first = manager.run(Research, input, { key: "research:42" });
-const duplicate = manager.run(Research, input, { key: "research:42" });
-
-first.id === duplicate.id;
+checkpoint<Input, Output>(
+  key: string,
+  input: Input,
+  operation: () => Output | PromiseLike<Output>,
+): Task<Awaited<Output>>
 ```
 
-The duplicate joins the existing execution. Reusing the key with different input fails with `ExecutionIdentityConflictError`. A stable key deduplicates execution records; it does not provide exactly-once external effects.
+- Keys are unique logical effect identities within a job; use stable turn/tool-call IDs, not random values or completion order.
+- `input` is the identity payload. Include all changing arguments used by the operation; the closure is not serialized or inspected.
+- A first call atomically reserves the key and input fingerprint before executing.
+- A completed key returns its persisted result, including `undefined`, without invoking the operation.
+- The same key with different input raises `CheckpointIdentityConflictError`, even after an unsuccessful operation.
+- Concurrent matching calls within an attempt join the same in-flight operation and read its committed result, not another caller's mutable return value. Different keys can run concurrently using Runner `forkGroup()`.
+- A failed operation releases its reservation but retains input identity. A caught failure may be retried explicitly; otherwise job retry policy applies.
+- Operations are leaf effects: nested checkpoints are rejected. Put orchestration and checkpoints in the job handler, not inside another checkpoint operation.
+- A checkpoint has a nested Runner task boundary: its child tasks are joined and unobserved failures checked before result commit. DI resources remain owned by the job's scope. Use explicit `using`/`await using` for resources that must close before an individual checkpoint commits.
+- Checkpoint tasks are owned by Runner. Await them; returning from the job cancels and joins unfinished work rather than creating detached durable jobs.
 
-## Store contract
+## Recovery semantics
 
-`ExecutionStore` persists the full execution record and implements atomic node transitions:
+```text
+attempt 1: handler entry → model checkpoint committed → tool checkpoint committed → crash
+attempt 2: handler entry → model result reused → tool result reused → new effects → complete
+```
 
-- idempotent execution creation and loading;
-- ready-node claim;
-- lease heartbeat;
-- fenced completion, failure, release, and cancellation acknowledgement;
-- execution cancellation;
-- expired-lease recovery.
+This is keyed result reuse, **not automatic deterministic workflow replay**. JavaScript locals, stacks, closures, ordinary promises, Runner scopes, and `fork()` tasks are not persisted. Code between checkpoints executes again. Keep branching dependent on persisted input/results; place nondeterministic decisions and external effects inside checkpoints. Changes to control flow, checkpoint meaning, or output schemas require a new job identity (for example `research:v2`) while old jobs drain with old code.
 
-`MemoryStore` is the reference state machine and validates persistence boundaries with `structuredClone()`. It supports recovery between Manager instances sharing that store, but it does not survive process restart. Production stores must preserve the same atomic transitions in durable storage.
+Execution is **at least once**. An external effect may succeed before its checkpoint commit is acknowledged; it can run again after recovery. Supply an external idempotency key derived unambiguously from execution ID and checkpoint key, or coordinate the external effect transactionally. Activation fencing protects store writes, not external systems.
 
-Inputs, node results, and errors must be serializable by the selected store.
+There are no durable timers, signals, detached child jobs, or instruction-level resume. Ordinary sleeps consume the active attempt and start over on retry.
 
-## Lifecycle
+## Runner ownership and DI
 
-`close()` stops claiming nodes, aborts and joins local attempts, and releases unfinished nodes for another worker. It does not discard completed results. `Manager` implements `AsyncDisposable`.
+Handlers can use `inject()`, `onStart()`, `onDispose()`, `fork()`, `forkGroup()`, `signal()`, and other Runner APIs unchanged. Configure providers with `manager.provide(Token, factory)` before starting work. Manager reserves the `DurableExecution` token for its attempt-local checkpoint service.
 
-Terminal execution states are `completed`, `failed`, and `cancelled`. Cancellation can temporarily expose `cancelling` while running attempts unwind.
+`currentExecution()` returns `{ executionId, job, attempt, signal }` only within a managed job. Each attempt gets a new scope and handler instance. Manager commits the **job result only after** Runner joins children and the scope disposes successfully. Completed checkpoints remain committed even if subsequent job cleanup fails; their resources must not depend on that later cleanup succeeding. Handler and cleanup failures are preserved together in `SerializedError.errors`.
+
+Disposal runs in the attempt's Runner context, so cleanup can access `currentExecution()`, `signal()`, and already-resolved dependencies. The task group is already closed; cleanup must not start new child work. Heartbeat failures retain independent cleanup failures, and cached worker errors apply only to the affected attempt.
+
+Cancellation is cooperative: pass Runner's `signal()` to cancellable APIs. Durable state remains `cancelling` until the active attempt unwinds; a disappeared worker is handled by lease recovery. `close()` stops claims, aborts and joins local attempts, and releases unfinished jobs without consuming retry budget or discarding checkpoints. A process crash cannot run cleanup.
+
+## Retry policy
+
+Field-wise precedence:
+
+```text
+Manager defaults < @Job retry options < run(..., { retry })
+```
+
+`retries: 3` allows one initial attempt and three retries. Failures and expired leases consume retry budget; graceful worker shutdown does not. Failed attempts restart at handler entry while completed checkpoint results remain available. Retry exhaustion fails the job. No checkpoint-specific scheduler or separate retry policy is involved.
+
+## Persistence contract and architecture
+
+```text
+Manager → JobRegistry
+        → DurableWorker → JobActivationRunner → Runner attempt
+                                             → CheckpointRuntime
+MemoryStore → pure job and checkpoint transitions
+```
+
+- `src/job/`: decorator metadata and atomic registration.
+- `src/execution/`: records, handles, retries, pure job/checkpoint state transitions.
+- `src/runtime/`: worker ownership, activation finalization, Runner wrapping, checkpoint execution. `lease.ts` owns heartbeat renewal and interruption.
+- `src/persistence/store.ts`: `ExecutionStore` SPI.
+- `src/persistence/adapter/memory-store.ts`: in-process reference adapter.
+
+The SPI provides atomic create, claim, heartbeat, completion, failure, release, cancellation, lease recovery, and checkpoint reservation/completion/release. Mutations are fenced by execution ID, activation ID, and lease; checkpoint mutations also validate key and input fingerprint. Completing a checkpoint atomically stores its result with completed status. Completing a job stores its terminal result atomically. Cancellation and terminal states reject subsequent success writes.
+
+Inputs and checkpoint/job results must support structured cloning; the selected store may impose further serialization constraints. Returned store records must not share mutable references with stored data. Durable adapters must implement these transitions transactionally or through compare-and-set, not separate unprotected reads and writes.
+
+The former graph API and record format are removed, with no compatibility aliases. Existing graph records cannot be reinterpreted as job records; drain or explicitly migrate them before switching storage.
 
 ## Development
 
 ```sh
 pnpm install
+pnpm format
 pnpm check
 pnpm build
 pnpm test
 ```
 
-Rspack emits the Node.js ESM runtime bundle. TypeScript emits declarations and declaration maps.
+Rspack emits the runtime bundle and TypeScript emits declarations. Consumers import published package exports, never sibling Runner source.

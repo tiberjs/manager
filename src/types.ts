@@ -6,8 +6,6 @@ export type ExecutionStatus =
   | "failed"
   | "cancelled";
 
-export type NodeStatus = "blocked" | "ready" | "running" | "completed" | "failed" | "cancelled";
-
 export interface SerializedError {
   readonly name: string;
   readonly message: string;
@@ -32,65 +30,26 @@ export interface StoredRetryPolicy {
 }
 
 export interface ExecutionOptions {
-  /** Idempotency key scoped to the workflow definition. */
+  /** Idempotency key scoped to the registered job name. */
   readonly key?: string;
   readonly retry?: RetryPolicy;
 }
 
-export interface StepOptions {
-  readonly retry?: RetryPolicy;
-}
-
-export interface WorkflowOptions {
+export interface JobOptions {
   readonly name: string;
   readonly retry?: RetryPolicy;
 }
 
-declare const NODE_VALUE: unique symbol;
-
-/** A symbolic value produced by the workflow input or a completed DAG node. */
-export interface NodeRef<T> {
-  readonly [NODE_VALUE]: (value: T) => T;
-}
-
-export type WorkflowInput<T> = NodeRef<T>;
-
-export type InputBinding<T> =
-  | NodeRef<T>
-  | (T extends readonly (infer Item)[]
-      ? readonly InputBinding<Item>[]
-      : T extends object
-        ? { readonly [Key in keyof T]: InputBinding<T[Key]> }
-        : T);
-
-export interface StepHandler<Input, Output> {
+export interface JobHandler<Input, Output> {
   run(input: Input): Output | PromiseLike<Output>;
 }
 
-export type StepConstructor<Input = unknown, Output = unknown> = new () => StepHandler<
-  Input,
-  Output
->;
-
-export interface WorkflowShape<Input, Output> {
-  build(input: WorkflowInput<Input>): NodeRef<Output>;
-}
-
-export type WorkflowConstructor = new () => object;
-
-export type WorkflowInputOf<Workflow extends WorkflowConstructor> =
-  InstanceType<Workflow> extends { build(input: infer Input): unknown }
-    ? Input extends NodeRef<infer Value>
-      ? Value
-      : never
-    : never;
-
-export type WorkflowOutputOf<Workflow extends WorkflowConstructor> =
-  InstanceType<Workflow> extends { build(input: never): infer Output }
-    ? Output extends NodeRef<infer Value>
-      ? Value
-      : never
-    : never;
+export type JobConstructor = new () => JobHandler<never, unknown>;
+export type JobInputOf<Job extends JobConstructor> =
+  Parameters<InstanceType<Job>["run"]> extends []
+    ? undefined
+    : Parameters<InstanceType<Job>["run"]>[0];
+export type JobOutputOf<Job extends JobConstructor> = Awaited<ReturnType<InstanceType<Job>["run"]>>;
 
 export interface Execution<T> extends PromiseLike<T> {
   readonly id: string;
@@ -98,10 +57,26 @@ export interface Execution<T> extends PromiseLike<T> {
   cancel(reason?: unknown): Promise<void>;
 }
 
-export interface NodeRecord {
+export interface WrappedJob<Input, Output> {
+  run(input: Input, options?: ExecutionOptions): Execution<Output>;
+  get(id: string): Execution<Output>;
+}
+
+export type CheckpointRecord = {
+  readonly key: string;
+  readonly inputFingerprint: string;
+} & (
+  | { readonly status: "running"; readonly activationId?: string }
+  | { readonly status: "completed"; readonly result: unknown }
+);
+
+export interface ExecutionRecord {
   readonly id: string;
-  readonly dependencies: readonly string[];
-  readonly status: NodeStatus;
+  readonly key?: string;
+  readonly job: string;
+  readonly input: unknown;
+  readonly inputFingerprint: string;
+  readonly status: ExecutionStatus;
   readonly attempt: number;
   readonly failures: number;
   readonly retry: StoredRetryPolicy;
@@ -109,19 +84,7 @@ export interface NodeRecord {
   readonly activationId?: string;
   readonly workerId?: string;
   readonly leaseExpiresAt?: number;
-  readonly result?: unknown;
-  readonly error?: SerializedError;
-}
-
-export interface ExecutionRecord {
-  readonly id: string;
-  readonly key?: string;
-  readonly workflow: string;
-  readonly input: unknown;
-  readonly inputFingerprint: string;
-  readonly outputNodeId: string;
-  readonly status: ExecutionStatus;
-  readonly nodes: Readonly<Record<string, NodeRecord>>;
+  readonly checkpoints: Readonly<Record<string, CheckpointRecord>>;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly result?: unknown;
@@ -131,8 +94,7 @@ export interface ExecutionRecord {
 
 export interface ExecutionInfo {
   readonly executionId: string;
-  readonly workflow: string;
-  readonly nodeId: string;
+  readonly job: string;
   readonly attempt: number;
   readonly signal: AbortSignal;
 }

@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { ManagerClosedError } from "../errors.js";
-import type { ClaimedNode, ExecutionStore } from "../persistence/store.js";
-import type { WorkflowRegistry } from "../workflow/registry.js";
+import type { ClaimedExecution, ExecutionStore } from "../persistence/store.js";
+import type { JobRegistry } from "../job/registry.js";
 import type { AttemptProvider } from "./attempt.js";
-import { NodeActivationRunner } from "./node-activation.js";
+import { JobActivationRunner } from "./job-activation.js";
 
 export interface WorkerOptions {
   readonly store: ExecutionStore;
-  readonly registry: WorkflowRegistry;
+  readonly registry: JobRegistry;
   readonly providers: readonly AttemptProvider[];
   readonly concurrency: number;
   readonly leaseDurationMs: number;
@@ -18,7 +18,11 @@ export interface WorkerFailure {
   readonly error: unknown;
 }
 
-interface ActiveNode {
+interface AttemptFailure extends WorkerFailure {
+  readonly attempt: number;
+}
+
+interface ActiveExecution {
   readonly executionId: string;
   readonly controller: AbortController;
   readonly promise: Promise<void>;
@@ -26,17 +30,17 @@ interface ActiveNode {
 
 const MANAGER_CLOSED = new ManagerClosedError();
 
-/** Owns node claiming, local activation concurrency, wakeups, and worker shutdown. */
+/** Owns job claiming, local activation concurrency, wakeups, and worker shutdown. */
 export class DurableWorker {
   private readonly store: ExecutionStore;
-  private readonly registry: WorkflowRegistry;
+  private readonly registry: JobRegistry;
   private readonly concurrency: number;
   private readonly leaseDurationMs: number;
   private readonly workerId = randomUUID();
   private readonly wakeSignal: PollSignal;
-  private readonly activationRunner: NodeActivationRunner;
-  private readonly active = new Map<string, ActiveNode>();
-  private readonly executionFailures = new Map<string, WorkerFailure>();
+  private readonly activationRunner: JobActivationRunner;
+  private readonly active = new Map<string, ActiveExecution>();
+  private readonly executionFailures = new Map<string, AttemptFailure>();
   private startPromise: Promise<void> | undefined;
   private workerPromise: Promise<void> | undefined;
   private workerFailure: WorkerFailure | undefined;
@@ -50,7 +54,7 @@ export class DurableWorker {
     this.leaseDurationMs = positiveNumber(options.leaseDurationMs, "leaseDurationMs");
     const pollIntervalMs = positiveNumber(options.pollIntervalMs, "pollIntervalMs");
     this.wakeSignal = new PollSignal(pollIntervalMs);
-    this.activationRunner = new NodeActivationRunner({
+    this.activationRunner = new JobActivationRunner({
       store: options.store,
       registry: options.registry,
       providers: options.providers,
@@ -73,8 +77,9 @@ export class DurableWorker {
     return this.wakeSignal.wait();
   }
 
-  failureFor(executionId: string): WorkerFailure | undefined {
-    return this.executionFailures.get(executionId) ?? this.workerFailure;
+  failureFor(executionId: string, attempt: number): WorkerFailure | undefined {
+    const failure = this.executionFailures.get(executionId);
+    return failure?.attempt === attempt ? failure : this.workerFailure;
   }
 
   abortExecution(executionId: string, reason: unknown): void {
@@ -97,9 +102,6 @@ export class DurableWorker {
 
     this.workerPromise = this.workerLoop().catch((error: unknown) => {
       this.workerFailure = { error };
-      for (const node of this.active.values()) {
-        this.executionFailures.set(node.executionId, { error });
-      }
       this.wakeSignal.wake();
     });
     this.wakeSignal.wake();
@@ -113,11 +115,22 @@ export class DurableWorker {
         const now = Date.now();
         const claimed = await this.store.claim({
           workerId: this.workerId,
-          workflows: this.registry.names,
+          jobs: this.registry.names,
           now,
           leaseExpiresAt: now + this.leaseDurationMs,
         });
         if (!claimed) {
+          break;
+        }
+        if (this.closing) {
+          const mutation = {
+            executionId: claimed.execution.id,
+            activationId: claimed.activationId,
+            now: Date.now(),
+          };
+          if (!(await this.store.release(mutation))) {
+            await this.store.acknowledgeCancellation({ ...mutation, now: Date.now() });
+          }
           break;
         }
         this.track(claimed);
@@ -129,17 +142,18 @@ export class DurableWorker {
     }
   }
 
-  private track(claimed: ClaimedNode): void {
+  private track(claimed: ClaimedExecution): void {
     const controller = new AbortController();
     const promise = this.activationRunner
       .run(claimed, controller)
-      .then((failure) => {
-        if (failure) {
-          this.abortExecution(failure.executionId, failure.reason);
-        }
-      })
       .catch((error: unknown) => {
-        this.executionFailures.set(claimed.execution.id, { error });
+        const previous = this.executionFailures.get(claimed.execution.id);
+        if (!previous || previous.attempt <= claimed.execution.attempt) {
+          this.executionFailures.set(claimed.execution.id, {
+            error,
+            attempt: claimed.execution.attempt,
+          });
+        }
       })
       .finally(() => {
         this.active.delete(claimed.activationId);
@@ -158,8 +172,9 @@ export class DurableWorker {
     for (const active of this.active.values()) {
       active.controller.abort(MANAGER_CLOSED);
     }
-    await Promise.allSettled([...this.active.values()].map((active) => active.promise));
+    await this.startPromise;
     await this.workerPromise;
+    await Promise.allSettled([...this.active.values()].map((active) => active.promise));
   }
 }
 

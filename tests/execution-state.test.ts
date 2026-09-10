@@ -1,145 +1,86 @@
 import { describe, expect, test } from "vitest";
 import {
-  claimExecutionNode,
-  completeExecutionNode,
-  failExecutionNode,
+  claimExecution,
+  completeExecution,
+  failExecution,
+  recoverExpiredExecution,
 } from "../src/execution/state.js";
-import type { ClaimNodeOptions, ExecutionRecord, NodeRecord } from "../src/index.js";
+import type { ExecutionRecord } from "../src/index.js";
 
-function node(
-  id: string,
-  status: NodeRecord["status"],
-  dependencies: readonly string[] = [],
-): NodeRecord {
+function pending(): ExecutionRecord {
   return {
-    id,
-    dependencies,
-    status,
-    attempt: status === "running" ? 1 : 0,
-    failures: 0,
-    retry: { retries: 0, delayMs: 0, backoff: 2, maxDelayMs: 30_000 },
-    availableAt: 0,
-    ...(status === "running"
-      ? { activationId: `${id}-activation`, workerId: "worker", leaseExpiresAt: 100 }
-      : {}),
-  };
-}
-
-function record(nodes: readonly NodeRecord[], outputNodeId: string): ExecutionRecord {
-  return {
-    id: "execution",
-    workflow: "state-test",
+    id: "job",
+    job: "state",
     input: null,
     inputFingerprint: "input",
-    outputNodeId,
-    status: nodes.some((value) => value.status === "running") ? "running" : "pending",
-    nodes: Object.fromEntries(nodes.map((value) => [value.id, value])),
+    status: "pending",
+    attempt: 0,
+    failures: 0,
+    retry: { retries: 1, delayMs: 5, backoff: 2, maxDelayMs: 100 },
+    availableAt: 0,
+    checkpoints: {},
     createdAt: 0,
     updatedAt: 0,
   };
 }
+const options = { workerId: "worker", jobs: ["state"], now: 1, leaseExpiresAt: 10 };
+const mutation = { executionId: "job", activationId: "activation", now: 2 };
 
-const claimOptions: ClaimNodeOptions = {
-  workerId: "worker",
-  workflows: ["state-test"],
-  now: 1,
-  leaseExpiresAt: 100,
-};
+describe("immutable job state transitions", () => {
+  test("a claim does not mutate a retained pending snapshot", () => {
+    const source = Object.freeze(pending());
+    const active = claimExecution(source, options, "activation");
+    expect(active).toMatchObject({ status: "running", attempt: 1, activationId: "activation" });
+    expect(source.status).toBe("pending");
+    expect(
+      claimExecution(source, { ...options, jobs: ["unregistered"] }, "activation"),
+    ).toBeUndefined();
+  });
 
-describe("execution state transitions", () => {
-  test("claiming produces a new running record without mutating the source", () => {
-    const source = record([node("result", "ready")], "result");
-
-    const claimed = claimExecutionNode(source, "result", claimOptions, "activation");
-
-    expect(claimed).toMatchObject({
+  test("retry retains committed results and clears ownership without changing a previous snapshot", () => {
+    const source: ExecutionRecord = {
+      ...pending(),
       status: "running",
-      updatedAt: 1,
-      nodes: {
-        result: {
+      activationId: "activation",
+      workerId: "worker",
+      leaseExpiresAt: 10,
+      checkpoints: {
+        done: { key: "done", inputFingerprint: "x", status: "completed", result: 42 },
+        unfinished: {
+          key: "unfinished",
+          inputFingerprint: "x",
           status: "running",
-          attempt: 1,
           activationId: "activation",
-          workerId: "worker",
-          leaseExpiresAt: 100,
         },
       },
+    };
+    Object.freeze(source);
+    Object.freeze(source.checkpoints);
+    const retry = failExecution(source, {
+      ...mutation,
+      error: { name: "Error", message: "again" },
+      retryAt: 7,
     });
-    expect(source).toMatchObject({
+    expect(retry).toMatchObject({
       status: "pending",
-      updatedAt: 0,
-      nodes: { result: { status: "ready", attempt: 0 } },
+      availableAt: 7,
+      activationId: undefined,
+      checkpoints: {
+        done: { status: "completed", result: 42 },
+        unfinished: { status: "running", activationId: undefined },
+      },
     });
-    expect(source.nodes.result).not.toHaveProperty("activationId");
+    expect(source.checkpoints.unfinished).toMatchObject({ activationId: "activation" });
+    expect(source.status).toBe("running");
   });
 
-  test("completion activates satisfied dependents without mutating the running record", () => {
-    const source = record(
-      [node("prepare", "running"), node("finish", "blocked", ["prepare"])],
-      "finish",
-    );
-
-    const completed = completeExecutionNode(
-      source,
-      {
-        executionId: source.id,
-        nodeId: "prepare",
-        activationId: "prepare-activation",
-        now: 2,
-      },
-      21,
-    );
-
-    expect(completed).toMatchObject({
-      status: "pending",
-      updatedAt: 2,
-      nodes: {
-        prepare: { status: "completed", result: 21, activationId: undefined },
-        finish: { status: "ready" },
-      },
-    });
-    expect(source.nodes.prepare).toMatchObject({
-      status: "running",
-      activationId: "prepare-activation",
-    });
-    expect(source.nodes.finish).toMatchObject({ status: "blocked" });
-  });
-
-  test("terminal failure cancels sibling ownership without mutating the source", () => {
-    const source = record(
-      [
-        node("first", "running"),
-        node("second", "running"),
-        node("join", "blocked", ["first", "second"]),
-      ],
-      "join",
-    );
-
-    const failed = failExecutionNode(source, {
-      executionId: source.id,
-      nodeId: "first",
-      activationId: "first-activation",
-      now: 2,
-      retryAt: 2,
-      error: { name: "Error", message: "failed" },
-    });
-
-    expect(failed).toMatchObject({
-      status: "failed",
-      nodes: {
-        first: { status: "failed", activationId: undefined },
-        second: {
-          status: "cancelled",
-          activationId: undefined,
-          workerId: undefined,
-          leaseExpiresAt: undefined,
-        },
-        join: { status: "cancelled" },
-      },
-    });
-    expect(source.nodes.second).toMatchObject({
-      status: "running",
-      activationId: "second-activation",
-    });
+  test("terminal results cannot be changed by completion or lease recovery", () => {
+    const active = claimExecution(pending(), options, "activation");
+    if (!active) throw new Error("Expected claim.");
+    const completed = completeExecution(active, mutation, 42);
+    if (!completed) throw new Error("Expected completion.");
+    expect(completeExecution(completed, mutation, 0)).toBeUndefined();
+    expect(recoverExpiredExecution(completed, 100)).toBeUndefined();
+    expect(completed.result).toBe(42);
   });
 });

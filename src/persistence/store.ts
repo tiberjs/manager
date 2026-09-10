@@ -5,51 +5,64 @@ export interface CreateExecutionResult {
   readonly created: boolean;
 }
 
-export interface ClaimNodeOptions {
+export interface ClaimExecutionOptions {
   readonly workerId: string;
-  readonly workflows: readonly string[];
+  readonly jobs: readonly string[];
   readonly now: number;
   readonly leaseExpiresAt: number;
 }
 
-export interface ClaimedNode {
+export interface ClaimedExecution {
   readonly execution: ExecutionRecord;
-  readonly nodeId: string;
   readonly activationId: string;
 }
 
 export type HeartbeatResult = "renewed" | "cancel-requested" | "lost";
 
-export interface NodeMutation {
+export interface ExecutionMutation {
   readonly executionId: string;
-  readonly nodeId: string;
   readonly activationId: string;
   readonly now: number;
 }
 
-export interface NodeFailure extends NodeMutation {
+export interface ExecutionFailure extends ExecutionMutation {
   readonly error: SerializedError;
   readonly retryAt: number;
 }
 
-/** Persistence and atomic state transitions for the built-in DAG runtime. */
+export interface CheckpointMutation extends ExecutionMutation {
+  readonly key: string;
+  readonly inputFingerprint: string;
+}
+
+export type BeginCheckpointResult =
+  | { readonly status: "execute" }
+  | { readonly status: "completed"; readonly result: unknown }
+  | { readonly status: "busy" | "conflict" | "lost" };
+
+/** Atomic job transitions. All returned values must be isolated from stored state. */
 export interface ExecutionStore {
   create(record: ExecutionRecord): Promise<CreateExecutionResult>;
   load(id: string): Promise<ExecutionRecord | null>;
-
-  claim(options: ClaimNodeOptions): Promise<ClaimedNode | null>;
+  claim(options: ClaimExecutionOptions): Promise<ClaimedExecution | null>;
   heartbeat(
-    mutation: NodeMutation,
+    mutation: ExecutionMutation,
     workerId: string,
     leaseExpiresAt: number,
   ): Promise<HeartbeatResult>;
-  complete(mutation: NodeMutation, result: unknown): Promise<boolean>;
-  fail(failure: NodeFailure): Promise<boolean>;
-  release(mutation: NodeMutation): Promise<boolean>;
-  acknowledgeCancellation(mutation: NodeMutation): Promise<boolean>;
-
+  complete(mutation: ExecutionMutation, result: unknown): Promise<boolean>;
+  fail(failure: ExecutionFailure): Promise<boolean>;
+  release(mutation: ExecutionMutation): Promise<boolean>;
+  acknowledgeCancellation(mutation: ExecutionMutation): Promise<boolean>;
   cancel(id: string, reason: SerializedError, now: number): Promise<boolean>;
   recoverExpired(now: number): Promise<number>;
+
+  /** Atomically fences ownership, checks input identity, and reserves or reuses a checkpoint. */
+  beginCheckpoint(mutation: CheckpointMutation): Promise<BeginCheckpointResult>;
+  /** Persist success only for the reserved key, matching input and live activation. */
+  completeCheckpoint(mutation: CheckpointMutation, result: unknown): Promise<boolean>;
+  /** Unreserve failed work without forgetting its input identity. */
+  releaseCheckpoint(mutation: CheckpointMutation): Promise<boolean>;
 }
 
 export function terminal(status: ExecutionStatus): boolean {

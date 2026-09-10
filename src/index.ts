@@ -1,6 +1,7 @@
 export {
   ActivationLostError,
-  DuplicateWorkflowError,
+  CheckpointIdentityConflictError,
+  DuplicateJobError,
   ExecutionCancelledError,
   ExecutionFailedError,
   ExecutionIdentityConflictError,
@@ -8,40 +9,36 @@ export {
   serializeError,
 } from "./errors.js";
 export { currentExecution } from "./runtime/attempt.js";
+export { DurableExecution } from "./runtime/checkpoint.js";
 export { Manager, createManager } from "./manager.js";
 export type { ManagerOptions } from "./manager.js";
 export { MemoryStore } from "./persistence/adapter/memory-store.js";
 export type {
-  ClaimedNode,
-  ClaimNodeOptions,
+  BeginCheckpointResult,
+  CheckpointMutation,
+  ClaimedExecution,
+  ClaimExecutionOptions,
   CreateExecutionResult,
   ExecutionStore,
   HeartbeatResult,
-  NodeFailure,
-  NodeMutation,
+  ExecutionFailure,
+  ExecutionMutation,
 } from "./persistence/store.js";
-export { DurableGraph, Workflow } from "./workflow/definition.js";
-export type { CompiledNode, CompiledWorkflow } from "./workflow/definition.js";
+export { Job } from "./job/definition.js";
 export type {
+  CheckpointRecord,
   Execution,
   ExecutionInfo,
   ExecutionOptions,
   ExecutionRecord,
   ExecutionStatus,
-  InputBinding,
-  NodeRecord,
-  NodeRef,
-  NodeStatus,
+  JobConstructor,
+  JobHandler,
+  JobInputOf,
+  JobOptions,
+  JobOutputOf,
   RetryPolicy,
   SerializedError,
-  StepConstructor,
-  StepHandler,
-  StepOptions,
   StoredRetryPolicy,
-  WorkflowConstructor,
-  WorkflowInput,
-  WorkflowInputOf,
-  WorkflowOptions,
-  WorkflowOutputOf,
-  WorkflowShape,
+  WrappedJob,
 } from "./types.js";

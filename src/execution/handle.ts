@@ -9,13 +9,17 @@ export interface ExecutionHost {
 export class ManagedExecution<T> implements Execution<T> {
   readonly id: string;
   private readonly host: ExecutionHost;
-  private readonly ready: Promise<void>;
+  private readonly admission: Promise<{ readonly error: unknown } | undefined>;
   private resultPromise: Promise<T> | undefined;
 
   constructor(id: string, host: ExecutionHost, ready: Promise<unknown>) {
     this.id = id;
     this.host = host;
-    this.ready = ready.then(() => undefined);
+    // Handles may be observed later; retain admission errors without an unowned rejection.
+    this.admission = ready.then(
+      () => undefined,
+      (error: unknown) => ({ error }),
+    );
   }
 
   // oxlint-disable-next-line unicorn/no-thenable -- Durable executions are intentionally awaitable.
@@ -27,16 +31,23 @@ export class ManagedExecution<T> implements Execution<T> {
   }
 
   async status(): Promise<ExecutionStatus> {
-    await this.ready;
+    await this.waitUntilReady();
     return (await this.host.load(this.id)).status;
   }
 
   async cancel(reason?: unknown): Promise<void> {
-    await this.ready;
+    await this.waitUntilReady();
     await this.host.cancel(this.id, reason);
   }
 
   private result(): Promise<T> {
-    return (this.resultPromise ??= this.ready.then(() => this.host.wait<T>(this.id)));
+    return (this.resultPromise ??= this.waitUntilReady().then(() => this.host.wait<T>(this.id)));
+  }
+
+  private async waitUntilReady(): Promise<void> {
+    const failure = await this.admission;
+    if (failure) {
+      throw failure.error;
+    }
   }
 }

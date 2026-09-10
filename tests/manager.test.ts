@@ -1,654 +1,632 @@
-import { fork, inject, onDispose, signal, token } from "@tiberjs/runner";
+import { fork, forkGroup, inject, onDispose, signal, token } from "@tiberjs/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  DurableGraph,
-  DuplicateWorkflowError,
+  DurableExecution,
+  DuplicateJobError,
   ExecutionCancelledError,
   ExecutionIdentityConflictError,
   ExecutionFailedError,
+  Job,
   Manager,
   MemoryStore,
-  Workflow,
   createManager,
   currentExecution,
 } from "../src/index.js";
 import type {
-  ClaimedNode,
-  ClaimNodeOptions,
+  ClaimedExecution,
+  ClaimExecutionOptions,
+  ExecutionMutation,
+  JobConstructor,
+  JobOptions,
   ManagerOptions,
-  NodeRef,
-  WorkflowInput,
-  WorkflowOptions,
 } from "../src/index.js";
 
 const managers: Manager[] = [];
-
 function create(store = new MemoryStore(), options: Partial<ManagerOptions> = {}): Manager {
   const manager = createManager({
     store,
     concurrency: 2,
     pollIntervalMs: 5,
-    leaseDurationMs: 100,
+    leaseDurationMs: 1000,
     ...options,
   });
   managers.push(manager);
   return manager;
 }
-
-function decorateWorkflow<Value extends new () => object>(
-  options: string | WorkflowOptions,
-  value: Value,
-): void {
-  const decorator = typeof options === "string" ? Workflow(options) : Workflow(options);
-  decorator(value, {} as ClassDecoratorContext<Value>);
+function define<Value extends JobConstructor>(options: string | JobOptions, type: Value): Value {
+  Job(options)(type, {} as ClassDecoratorContext<Value>);
+  return type;
 }
-
+function untilAborted(): Promise<never> {
+  const current = signal();
+  current.throwIfAborted();
+  const deferred = Promise.withResolvers<never>();
+  current.addEventListener("abort", () => deferred.reject(current.reason), { once: true });
+  return deferred.promise;
+}
 function nextTurn(): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setImmediate(resolve);
-  return promise;
+  const deferred = Promise.withResolvers<void>();
+  setImmediate(deferred.resolve);
+  return deferred.promise;
 }
-
 afterEach(async () => {
-  await Promise.all(managers.splice(0).map(async (manager) => manager.close()));
+  await Promise.all(managers.splice(0).map((manager) => manager.close()));
 });
 
-describe("durable DAG", () => {
-  it("runs independent nodes concurrently and passes their results to a dependent node", async () => {
-    const bothStarted = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    const started = new Set<string>();
-
-    class SearchWeb {
-      async run(input: { query: string }): Promise<string> {
-        started.add("web");
-        if (started.size === 2) {
-          bothStarted.resolve();
+describe("durable Runner jobs", () => {
+  it("does not poison a new attempt with a previous activation infrastructure failure", async () => {
+    const resumed = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const unavailable = new Error("commit unavailable");
+    class RecoverableStore extends MemoryStore {
+      rejected = false;
+      override async complete(mutation: ExecutionMutation, result: unknown): Promise<boolean> {
+        if (!this.rejected) {
+          this.rejected = true;
+          await super.release(mutation);
+          throw unavailable;
         }
-        await release.promise;
-        return `web:${input.query}`;
+        return super.complete(mutation, result);
       }
     }
-
-    class SearchPapers {
-      async run(input: { query: string }): Promise<string> {
-        started.add("papers");
-        if (started.size === 2) {
-          bothStarted.resolve();
+    const Echo = define(
+      "recover-infrastructure",
+      class {
+        async run(): Promise<number> {
+          if (currentExecution().attempt > 1) {
+            resumed.resolve();
+            await finish.promise;
+          }
+          return 42;
         }
-        await release.promise;
-        return `papers:${input.query}`;
-      }
-    }
-
-    class Summarize {
-      run(input: { web: string; papers: string }): string {
-        return `${input.web}|${input.papers}`;
-      }
-    }
-
-    class Research extends DurableGraph<{ query: string }, string> {
-      build(input: WorkflowInput<{ query: string }>): NodeRef<string> {
-        const web = this.step("web", SearchWeb, input);
-        const papers = this.step("papers", SearchPapers, input);
-        return this.step("summary", Summarize, { web, papers });
-      }
-    }
-    decorateWorkflow("research", Research);
-
-    const store = new MemoryStore();
-    const manager = create(store).register(Research);
-    const execution = manager.run(Research, { query: "durable" });
-
-    await bothStarted.promise;
-    await expect(execution.status()).resolves.toBe("running");
-    release.resolve();
-
-    await expect(execution).resolves.toBe("web:durable|papers:durable");
-    expect(await store.load(execution.id)).toMatchObject({
-      status: "completed",
-      nodes: {
-        web: { status: "completed", attempt: 1 },
-        papers: { status: "completed", attempt: 1 },
-        summary: { status: "completed", attempt: 1 },
       },
-    });
+    );
+    const manager = create(new RecoverableStore());
+    const wrapped = manager.wrap(Echo);
+    const original = wrapped.run(undefined);
+    await expect(original).rejects.toBe(unavailable);
+    await resumed.promise;
+    const fresh = wrapped.get(original.id);
+    const result = fresh.then(
+      () => "completed",
+      (error: unknown) => error,
+    );
+    await nextTurn();
+    finish.resolve();
+    await expect(result).resolves.toBe("completed");
   });
 
-  it("retries only the failed node and retains completed upstream results", async () => {
-    let prepareRuns = 0;
-    let processRuns = 0;
-
-    class Prepare {
-      run(input: number): number {
-        prepareRuns += 1;
-        return input + 1;
+  it("preserves cleanup failure when the heartbeat aborts an attempt", async () => {
+    const infrastructureFailure = new Error("heartbeat unavailable");
+    const cleanupFailure = new Error("cleanup failed");
+    class FailedHeartbeatStore extends MemoryStore {
+      override async heartbeat(): Promise<never> {
+        throw infrastructureFailure;
       }
     }
-
-    class Process {
-      run(input: number): number {
-        processRuns += 1;
-        if (processRuns === 1) {
-          throw new Error("transient");
+    const Wait = define(
+      "heartbeat-cleanup",
+      class {
+        constructor() {
+          onDispose(() => {
+            throw cleanupFailure;
+          });
         }
-        return input * 2;
-      }
-    }
-
-    class RetryNode extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        const prepared = this.step("prepare", Prepare, input);
-        return this.step("process", Process, prepared);
-      }
-    }
-    decorateWorkflow({ name: "retry-node", retry: { retries: 1 } }, RetryNode);
-
-    const store = new MemoryStore();
-    const manager = create(store).register(RetryNode);
-    const execution = manager.run(RetryNode, 20);
-
-    await expect(execution).resolves.toBe(42);
-    expect(prepareRuns).toBe(1);
-    expect(processRuns).toBe(2);
-    expect(await store.load(execution.id)).toMatchObject({
-      nodes: {
-        prepare: { attempt: 1, failures: 0 },
-        process: { attempt: 2, failures: 1 },
+        async run(): Promise<void> {
+          await untilAborted();
+        }
       },
-    });
-  });
-
-  it("fails the workflow and never executes downstream nodes after retry exhaustion", async () => {
-    let downstreamRuns = 0;
-
-    class Fail {
-      run(): never {
-        throw new Error("permanent");
-      }
-    }
-
-    class Downstream {
-      run(input: unknown): unknown {
-        downstreamRuns += 1;
-        return input;
-      }
-    }
-
-    class Failure extends DurableGraph<undefined, unknown> {
-      build(input: WorkflowInput<undefined>): NodeRef<unknown> {
-        const failed = this.step("fail", Fail, input);
-        return this.step("downstream", Downstream, failed);
-      }
-    }
-    decorateWorkflow("failure", Failure);
-
-    const manager = create().register(Failure);
-    const execution = manager.run(Failure, undefined);
+    );
+    const execution = create(new FailedHeartbeatStore(), { leaseDurationMs: 60 })
+      .wrap(Wait)
+      .run(undefined);
     const failure = await execution.then(
       () => undefined,
-      (error) => error,
+      (error: unknown) => error,
     );
-
-    expect(failure).toBeInstanceOf(ExecutionFailedError);
-    expect(failure).toMatchObject({ error: { message: "permanent" } });
-    expect(downstreamRuns).toBe(0);
+    expect(failure).toBeInstanceOf(AggregateError);
+    if (!(failure instanceof AggregateError)) throw new Error("Expected combined failure.");
+    expect(failure.errors).toContain(cleanupFailure);
   });
 
-  it("rejects disconnected nodes when the workflow is registered", () => {
-    class Identity {
-      run(input: number): number {
-        return input;
-      }
-    }
-
-    class Disconnected extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        this.step("orphan", Identity, input);
-        return this.step("output", Identity, input);
-      }
-    }
-    decorateWorkflow("disconnected", Disconnected);
-
-    expect(() => create().register(Disconnected)).toThrow(/disconnected.*orphan/i);
-  });
-});
-
-describe("recovery and lifecycle", () => {
-  it("keeps completed nodes and resumes only unfinished nodes in another manager", async () => {
-    const store = new MemoryStore();
-    const blocked = Promise.withResolvers<void>();
-    let prepareRuns = 0;
-    let finishRuns = 0;
-
-    class Prepare {
-      run(input: number): number {
-        prepareRuns += 1;
-        return input + 1;
-      }
-    }
-
-    class Finish {
-      async run(input: number): Promise<number> {
-        finishRuns += 1;
-        if (finishRuns === 1) {
-          blocked.resolve();
-          const current = signal();
-          const cancelled = Promise.withResolvers<never>();
-          current.addEventListener("abort", () => cancelled.reject(current.reason), {
-            once: true,
+  it("keeps Runner context available during job resource disposal", async () => {
+    let disposedJob: string | undefined;
+    const Resource = token<number>("cleanup-value");
+    const Cleanup = define(
+      "cleanup-context",
+      class {
+        readonly value = inject(Resource);
+        constructor() {
+          onDispose(() => {
+            disposedJob = currentExecution().job;
+            expect(inject(Resource)).toBe(42);
+            expect(signal().aborted).toBe(false);
           });
-          return cancelled.promise;
         }
-        return input * 2;
+        run(): number {
+          return 42;
+        }
+      },
+    );
+    await expect(
+      create()
+        .provide(Resource, () => 42)
+        .wrap(Cleanup)
+        .run(undefined),
+    ).resolves.toBe(42);
+    expect(disposedJob).toBe("cleanup-context");
+  });
+
+  it("acknowledges a cancelled claim arriving after shutdown", async () => {
+    const claimed = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    class SlowStore extends MemoryStore {
+      override async claim(options: ClaimExecutionOptions): Promise<ClaimedExecution | null> {
+        const result = await super.claim(options);
+        if (result) {
+          claimed.resolve();
+          await release.promise;
+        }
+        return result;
       }
     }
+    let runs = 0;
+    const Echo = define(
+      "late-cancel",
+      class {
+        run(): void {
+          runs += 1;
+        }
+      },
+    );
+    const manager = create(new SlowStore());
+    const execution = manager.wrap(Echo).run(undefined);
+    await claimed.promise;
+    await execution.cancel("stop before handler");
+    const closing = manager.close();
+    release.resolve();
+    await closing;
+    expect(runs).toBe(0);
+    await expect(execution.status()).resolves.toBe("cancelled");
+  });
 
-    class RecoverGraph extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        const prepared = this.step("prepare", Prepare, input);
-        return this.step("finish", Finish, prepared);
+  it("acknowledges cancellation racing with the final result commit", async () => {
+    const committing = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    class CommitGateStore extends MemoryStore {
+      override async complete(mutation: ExecutionMutation, result: unknown): Promise<boolean> {
+        committing.resolve();
+        await release.promise;
+        return super.complete(mutation, result);
       }
     }
-    decorateWorkflow("recover-graph", RecoverGraph);
+    const Echo = define(
+      "commit-race",
+      class {
+        run(): number {
+          return 42;
+        }
+      },
+    );
+    const execution = create(new CommitGateStore(), { leaseDurationMs: 60_000 })
+      .wrap(Echo)
+      .run(undefined);
+    await committing.promise;
+    await execution.cancel("too late for handler, not for commit");
+    release.resolve();
+    await nextTurn();
+    await expect(execution.status()).resolves.toBe("cancelled");
+    await expect(execution).rejects.toBeInstanceOf(ExecutionCancelledError);
+  });
 
-    const first = create(store).register(RecoverGraph);
-    const original = first.run(RecoverGraph, 20, { key: "recover:20" });
+  it("wraps ordinary handlers while Runner owns dynamic parallel work", async () => {
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let count = 0;
+    const Research = define(
+      "research",
+      class {
+        async run(query: string): Promise<string> {
+          const results = await forkGroup(
+            ...["web", "papers"].map((source) => async () => {
+              count += 1;
+              if (count === 2) started.resolve();
+              await release.promise;
+              return `${source}:${query}`;
+            }),
+          );
+          return results.join("|");
+        }
+      },
+    );
+    const wrapped = create().wrap(Research);
+    const execution = wrapped.run("durable");
+    await started.promise;
+    await expect(execution.status()).resolves.toBe("running");
+    release.resolve();
+    await expect(execution).resolves.toBe("web:durable|papers:durable");
+    await expect(wrapped.get(execution.id)).resolves.toBe("web:durable|papers:durable");
+  });
+
+  it("retries the entire ordinary handler with a fresh DI scope", async () => {
+    let constructions = 0;
+    let effects = 0;
+    let disposals = 0;
+    const Retry = define(
+      { name: "retry", retry: { retries: 1 } },
+      class {
+        constructor() {
+          constructions += 1;
+          onDispose(() => {
+            disposals += 1;
+          });
+        }
+        run(input: number): number {
+          effects += 1;
+          if (currentExecution().attempt === 1) throw new Error("transient");
+          return input * 2;
+        }
+      },
+    );
+    await expect(create().wrap(Retry).run(21)).resolves.toBe(42);
+    expect([constructions, effects, disposals]).toEqual([2, 2, 2]);
+  });
+
+  it("exhausts retries without executing code after the failure", async () => {
+    let runs = 0;
+    let after = false;
+    const Broken = define(
+      "broken",
+      class {
+        run(input: boolean): void {
+          runs += 1;
+          if (input) throw new Error("permanent");
+          after = true;
+        }
+      },
+    );
+    await expect(
+      create()
+        .wrap(Broken)
+        .run(true, { retry: { retries: 1 } }),
+    ).rejects.toMatchObject({
+      name: "ExecutionFailedError",
+      error: { message: "permanent" },
+    });
+    expect(runs).toBe(2);
+    expect(after).toBe(false);
+  });
+
+  it("replays dynamic checkpoints after shutdown in a different manager", async () => {
+    const blocked = Promise.withResolvers<void>();
+    let plans = 0;
+    let tools = 0;
+    let runs = 0;
+    const Agent = define(
+      "agent",
+      class {
+        readonly durable = inject(DurableExecution);
+        async run(input: number): Promise<number> {
+          runs += 1;
+          const plan = await this.durable.checkpoint("plan", input, () => {
+            plans += 1;
+            return { tool: "double", value: input + 1 };
+          });
+          const result = await this.durable.checkpoint(`tool:${plan.tool}`, plan, () => {
+            tools += 1;
+            return plan.value * 2;
+          });
+          if (runs === 1) {
+            blocked.resolve();
+            await untilAborted();
+          }
+          return result;
+        }
+      },
+    );
+    const store = new MemoryStore();
+    const first = create(store);
+    const original = first.wrap(Agent).run(20);
     await blocked.promise;
     await first.close();
-
-    expect(await store.load(original.id)).toMatchObject({
+    await expect(store.load(original.id)).resolves.toMatchObject({
       status: "pending",
-      nodes: {
-        prepare: { status: "completed", attempt: 1 },
-        finish: { status: "ready", attempt: 1 },
+      failures: 0,
+      checkpoints: {
+        plan: { status: "completed" },
+        "tool:double": { status: "completed", result: 42 },
       },
     });
-
-    const second = create(store).register(RecoverGraph);
+    const second = create(store);
+    const wrapped = second.wrap(Agent);
     await second.start();
-    const recovered = second.get(RecoverGraph, original.id);
-
-    await expect(recovered).resolves.toBe(42);
-    expect(prepareRuns).toBe(1);
-    expect(finishRuns).toBe(2);
+    await expect(wrapped.get(original.id)).resolves.toBe(42);
+    expect([runs, plans, tools]).toEqual([2, 1, 1]);
   });
 
-  it("waits after finding no additional ready work instead of polling continuously", async () => {
+  it("waits after no additional work rather than continuously polling", async () => {
     class CountingStore extends MemoryStore {
       claims = 0;
-
-      override async claim(options: ClaimNodeOptions): Promise<ClaimedNode | null> {
+      override async claim(options: ClaimExecutionOptions): Promise<ClaimedExecution | null> {
         this.claims += 1;
         return super.claim(options);
       }
     }
-
     const started = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
-    class Wait {
-      async run(): Promise<void> {
-        started.resolve();
-        await release.promise;
-      }
-    }
-    class SingleNode extends DurableGraph<undefined, void> {
-      build(input: WorkflowInput<undefined>): NodeRef<void> {
-        return this.step("wait", Wait, input);
-      }
-    }
-    decorateWorkflow("single-node", SingleNode);
-
+    const Wait = define(
+      "wait",
+      class {
+        async run(): Promise<void> {
+          started.resolve();
+          await release.promise;
+        }
+      },
+    );
     const store = new CountingStore();
-    const execution = create(store, { pollIntervalMs: 1_000 })
-      .register(SingleNode)
-      .run(SingleNode, undefined);
+    const execution = create(store, { pollIntervalMs: 1000 }).wrap(Wait).run(undefined);
     await started.promise;
     await nextTurn();
-    const settledClaims = store.claims;
+    const claims = store.claims;
     await nextTurn();
-
-    expect(store.claims).toBe(settledClaims);
+    expect(store.claims).toBe(claims);
     release.resolve();
     await expect(execution).resolves.toBeUndefined();
   });
 
-  it("propagates cancellation through Runner and waits for the active node to stop", async () => {
+  it("acknowledges cancellation only after Runner children and cleanup unwind", async () => {
     const started = Promise.withResolvers<void>();
-    let stopped = false;
-
-    class Wait {
-      async run(): Promise<void> {
-        const current = signal();
-        const cancelled = Promise.withResolvers<void>();
-        current.addEventListener(
-          "abort",
-          () => {
-            stopped = true;
-            cancelled.reject(current.reason);
-          },
-          { once: true },
-        );
-        started.resolve();
-        await cancelled.promise;
-      }
-    }
-
-    class Cancel extends DurableGraph<undefined, void> {
-      build(input: WorkflowInput<undefined>): NodeRef<void> {
-        return this.step("wait", Wait, input);
-      }
-    }
-    decorateWorkflow("cancel", Cancel);
-
-    const manager = create().register(Cancel);
-    const execution = manager.run(Cancel, undefined);
+    const cleanupStarted = Promise.withResolvers<void>();
+    const releaseCleanup = Promise.withResolvers<void>();
+    let childStopped = false;
+    const Wait = define(
+      "cancel",
+      class {
+        constructor() {
+          onDispose(async () => {
+            cleanupStarted.resolve();
+            await releaseCleanup.promise;
+          });
+        }
+        async run(): Promise<void> {
+          fork(async () => {
+            try {
+              await untilAborted();
+            } finally {
+              childStopped = true;
+            }
+          });
+          started.resolve();
+          await untilAborted();
+        }
+      },
+    );
+    const execution = create().wrap(Wait).run(undefined);
+    const rejection = execution.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
     await started.promise;
-
-    await execution.cancel("not needed");
-
-    await expect(execution).rejects.toBeInstanceOf(ExecutionCancelledError);
-    expect(stopped).toBe(true);
+    await execution.cancel("stop");
+    await cleanupStarted.promise;
+    await expect(execution.status()).resolves.toBe("cancelling");
+    expect(childStopped).toBe(true);
+    releaseCleanup.resolve();
+    await expect(rejection).resolves.toBeInstanceOf(ExecutionCancelledError);
     await expect(execution.status()).resolves.toBe("cancelled");
   });
 
-  it("finishes durable cancellation when manager shutdown overlaps node unwinding", async () => {
+  it("finishes cancellation when shutdown overlaps unwinding", async () => {
     const started = Promise.withResolvers<void>();
-
-    class Wait {
-      async run(): Promise<void> {
-        const current = signal();
-        const cancelled = Promise.withResolvers<void>();
-        current.addEventListener("abort", () => cancelled.reject(current.reason), { once: true });
-        started.resolve();
-        await cancelled.promise;
-      }
-    }
-
-    class CancelDuringClose extends DurableGraph<undefined, void> {
-      build(input: WorkflowInput<undefined>): NodeRef<void> {
-        return this.step("wait", Wait, input);
-      }
-    }
-    decorateWorkflow("cancel-during-close", CancelDuringClose);
-
+    const Wait = define(
+      "cancel-close",
+      class {
+        async run(): Promise<void> {
+          started.resolve();
+          await untilAborted();
+        }
+      },
+    );
     const store = new MemoryStore();
-    const manager = create(store).register(CancelDuringClose);
-    const execution = manager.run(CancelDuringClose, undefined);
+    const manager = create(store);
+    const execution = manager.wrap(Wait).run(undefined);
     const rejection = execution.then(
       () => undefined,
-      (error) => error,
+      (error: unknown) => error,
     );
     await started.promise;
-
-    await execution.cancel("stop");
+    await execution.cancel();
     await manager.close();
-
     await expect(rejection).resolves.toBeInstanceOf(ExecutionCancelledError);
     await expect(store.load(execution.id)).resolves.toMatchObject({ status: "cancelled" });
   });
 
-  it("runs node handlers in a Runner scope with DI, child joining, cleanup, and metadata", async () => {
-    const Value = token<number>("test.value");
+  it("provides Runner DI and metadata and commits only after cleanup", async () => {
+    const Value = token<number>("value");
     let childCompleted = false;
     let disposed = false;
-    let observed: ReturnType<typeof currentExecution> | undefined;
-
-    class ManagedNode {
-      private readonly value = inject(Value);
-
-      run(input: number): number {
-        observed = currentExecution();
-        onDispose(() => {
-          disposed = true;
-        });
-        fork(async () => {
-          await Promise.resolve();
-          childCompleted = true;
-        });
-        return input + this.value;
-      }
-    }
-
-    class RunnerNode extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        return this.step("managed", ManagedNode, input);
-      }
-    }
-    decorateWorkflow("runner-node", RunnerNode);
-
-    const manager = create()
-      .provide(Value, () => 2)
-      .register(RunnerNode);
-    const execution = manager.run(RunnerNode, 40);
-
-    await expect(execution).resolves.toBe(42);
+    const Managed = define(
+      "managed",
+      class {
+        readonly value = inject(Value);
+        run(input: number): number {
+          expect(currentExecution()).toMatchObject({ job: "managed", attempt: 1 });
+          onDispose(() => {
+            disposed = true;
+          });
+          fork(async () => {
+            await Promise.resolve();
+            childCompleted = true;
+          });
+          return input + this.value;
+        }
+      },
+    );
+    await expect(
+      create()
+        .provide(Value, () => 2)
+        .wrap(Managed)
+        .run(40),
+    ).resolves.toBe(42);
     expect(childCompleted).toBe(true);
     expect(disposed).toBe(true);
-    expect(observed).toMatchObject({
-      executionId: execution.id,
-      workflow: "runner-node",
-      nodeId: "managed",
-      attempt: 1,
-    });
   });
 
-  it("deduplicates identical keyed input and rejects conflicting input", async () => {
+  it("deduplicates keyed input and rejects conflicting input across managers", async () => {
     let runs = 0;
-
-    class Echo {
-      run(input: number): number {
-        runs += 1;
-        return input;
-      }
-    }
-
-    class Keyed extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        return this.step("echo", Echo, input);
-      }
-    }
-    decorateWorkflow("keyed", Keyed);
-
-    const manager = create().register(Keyed);
-    const first = manager.run(Keyed, 42, { key: "answer" });
-    const duplicate = manager.run(Keyed, 42, { key: "answer" });
-    const conflict = manager.run(Keyed, 7, { key: "answer" });
-
+    const Echo = define(
+      "keyed",
+      class {
+        run(input: number): number {
+          runs += 1;
+          return input;
+        }
+      },
+    );
+    const store = new MemoryStore();
+    const first = create(store).wrap(Echo).run(42, { key: "answer" });
+    const wrapped = create(store).wrap(Echo);
+    const duplicate = wrapped.run(42, { key: "answer" });
+    const conflict = wrapped.run(7, { key: "answer" });
+    const rejected = expect(conflict).rejects.toBeInstanceOf(ExecutionIdentityConflictError);
     expect(duplicate.id).toBe(first.id);
     await expect(Promise.all([first, duplicate])).resolves.toEqual([42, 42]);
-    await expect(conflict).rejects.toBeInstanceOf(ExecutionIdentityConflictError);
+    await rejected;
     expect(runs).toBe(1);
   });
-});
 
-describe("validation and failure boundaries", () => {
-  it("validates a registration batch before committing any workflow", async () => {
-    class Identity {
-      run(input: number): number {
-        return input;
-      }
-    }
-
-    class First extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        return this.step("first", Identity, input);
-      }
-    }
-
-    class Conflict extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        return this.step("conflict", Identity, input);
-      }
-    }
-
-    decorateWorkflow("atomic-registration", First);
-    decorateWorkflow("atomic-registration", Conflict);
-
-    const manager = create();
-    expect(() => manager.register(First, Conflict)).toThrow(DuplicateWorkflowError);
-    expect(() => manager.run(First, 42)).toThrow();
-
-    manager.register(First);
-    await expect(manager.run(First, 42)).resolves.toBe(42);
-  });
-
-  it("rejects invalid reusable retry policy during registration", () => {
-    class Identity {
-      run(input: number): number {
-        return input;
-      }
-    }
-
-    class InvalidRetry extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        return this.step("identity", Identity, input, { retry: { backoff: 0 } });
-      }
-    }
-    decorateWorkflow("invalid-retry", InvalidRetry);
-
-    expect(() => create().register(InvalidRetry)).toThrow(TypeError);
-  });
-
-  it("rejects cyclic step input bindings during graph compilation", () => {
-    class Identity {
-      run(input: unknown): unknown {
-        return input;
-      }
-    }
-
-    class CyclicInput extends DurableGraph<undefined, unknown> {
-      build(_input: WorkflowInput<undefined>): NodeRef<unknown> {
-        const binding: { self?: unknown } = {};
-        binding.self = binding;
-        return this.step("cyclic", Identity, binding);
-      }
-    }
-    decorateWorkflow("cyclic-input", CyclicInput);
-
-    expect(() => create().register(CyclicInput)).toThrow(TypeError);
-  });
-
-  it("persists both handler and cleanup failures from a node attempt", async () => {
-    const operationFailure = new Error("operation failed");
-    const cleanupFailure = new Error("cleanup failed");
-
-    class Broken {
-      constructor() {
-        onDispose(() => {
-          throw cleanupFailure;
-        });
-      }
-
-      run(): never {
-        throw operationFailure;
-      }
-    }
-
-    class FailurePair extends DurableGraph<undefined, never> {
-      build(input: WorkflowInput<undefined>): NodeRef<never> {
-        return this.step("broken", Broken, input);
-      }
-    }
-    decorateWorkflow("failure-pair", FailurePair);
-
-    const store = new MemoryStore();
-    const execution = create(store).register(FailurePair).run(FailurePair, undefined);
-    const rejected = await execution.then(
-      () => undefined,
-      (error) => error,
+  it("snapshots input at submission before an asynchronous store accepts it", async () => {
+    const Echo = define(
+      "snapshot",
+      class {
+        run(input: { value: number }): number {
+          return input.value;
+        }
+      },
     );
-
-    expect(rejected).toBeInstanceOf(ExecutionFailedError);
-    expect(rejected).toMatchObject({
-      error: {
-        name: "AggregateError",
-        errors: [{ message: "operation failed" }, { message: "cleanup failed" }],
-      },
-    });
-    await expect(store.load(execution.id)).resolves.toMatchObject({
-      status: "failed",
-      nodes: { broken: { status: "failed" } },
-    });
-  });
-
-  it("persists retry precedence from manager through execution overrides", async () => {
-    class Identity {
-      run(input: number): number {
-        return input;
-      }
-    }
-
-    const nodeRetry = { delayMs: 20 };
-    const workflowRetry = { retries: 2 };
-
-    class RetryPrecedence extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        return this.step("identity", Identity, input, { retry: nodeRetry });
-      }
-    }
-    decorateWorkflow({ name: "retry-precedence", retry: workflowRetry }, RetryPrecedence);
-    workflowRetry.retries = 99;
-
-    const store = new MemoryStore();
-    const manager = create(store, {
-      autoStart: false,
-      retry: { retries: 1, delayMs: 10, backoff: 2, maxDelayMs: 100 },
-    }).register(RetryPrecedence);
-    nodeRetry.delayMs = 999;
-    const execution = manager.run(RetryPrecedence, 42, { retry: { backoff: 3 } });
-
-    await expect(execution.status()).resolves.toBe("pending");
-    await expect(store.load(execution.id)).resolves.toMatchObject({
-      nodes: {
-        identity: {
-          retry: { retries: 2, delayMs: 20, backoff: 3, maxDelayMs: 100 },
-        },
-      },
-    });
-  });
-
-  it("snapshots declared object inputs when the workflow is registered", async () => {
-    const configuration = { offset: 1 };
-
-    class AddOffset {
-      run(input: { value: number; configuration: { offset: number } }): number {
-        return input.value + input.configuration.offset;
-      }
-    }
-
-    class Snapshot extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        return this.step("add", AddOffset, { value: input, configuration });
-      }
-    }
-    decorateWorkflow("snapshot", Snapshot);
-
-    const manager = create().register(Snapshot);
-    configuration.offset = 100;
-
-    await expect(manager.run(Snapshot, 41)).resolves.toBe(42);
-  });
-
-  it("supports step IDs that overlap object prototype property names", async () => {
-    class Identity {
-      run(input: number): number {
-        return input;
-      }
-    }
-
-    class PrototypeNamed extends DurableGraph<number, number> {
-      build(input: WorkflowInput<number>): NodeRef<number> {
-        return this.step("__proto__", Identity, input);
-      }
-    }
-    decorateWorkflow("prototype-named", PrototypeNamed);
-
-    const store = new MemoryStore();
-    const execution = create(store).register(PrototypeNamed).run(PrototypeNamed, 42);
-
+    const input = { value: 42 };
+    const execution = create().wrap(Echo).run(input);
+    input.value = 99;
     await expect(execution).resolves.toBe(42);
-    const persisted = await store.load(execution.id);
-    expect(Object.hasOwn(persisted?.nodes ?? {}, "__proto__")).toBe(true);
+  });
+
+  it("validates a registration batch without constructing or partially registering jobs", async () => {
+    let constructions = 0;
+    const First = define(
+      "atomic",
+      class {
+        constructor() {
+          constructions += 1;
+        }
+        run(input: number): number {
+          return input;
+        }
+      },
+    );
+    const Conflict = define(
+      "atomic",
+      class {
+        run(): void {}
+      },
+    );
+    const manager = create();
+    expect(() => manager.register(First, Conflict)).toThrow(DuplicateJobError);
+    expect(() => manager.run(First, 42)).toThrow();
+    expect(constructions).toBe(0);
+    await expect(manager.wrap(First).run(42)).resolves.toBe(42);
+  });
+
+  it("rejects invalid reusable retry policy before admission", () => {
+    const Broken = define(
+      { name: "invalid-retry", retry: { backoff: 0 } },
+      class {
+        run(): void {}
+      },
+    );
+    expect(() => create().wrap(Broken)).toThrow(TypeError);
+  });
+
+  it("preserves handler and cleanup failures", async () => {
+    const Broken = define(
+      "failure-pair",
+      class {
+        constructor() {
+          onDispose(() => {
+            throw new Error("cleanup");
+          });
+        }
+        run(): never {
+          throw new Error("operation");
+        }
+      },
+    );
+    const failure = await create()
+      .wrap(Broken)
+      .run(undefined)
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(ExecutionFailedError);
+    expect(failure).toMatchObject({
+      error: { name: "AggregateError", errors: [{ message: "operation" }, { message: "cleanup" }] },
+    });
+  });
+
+  it("applies execution retry overrides over snapshotted job and manager policies", async () => {
+    let attempts = 0;
+    const retry = { retries: 1 };
+    const Retried = define(
+      { name: "precedence", retry },
+      class {
+        run(): number {
+          attempts += 1;
+          if (attempts < 3) throw new Error("again");
+          return attempts;
+        }
+      },
+    );
+    retry.retries = 0;
+    await expect(
+      create(undefined, { retry: { retries: 0 } })
+        .wrap(Retried)
+        .run(undefined, { retry: { retries: 2 } }),
+    ).resolves.toBe(3);
+  });
+
+  it("releases a claim that returns after shutdown without running the handler", async () => {
+    const claimed = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    class SlowStore extends MemoryStore {
+      override async claim(options: ClaimExecutionOptions): Promise<ClaimedExecution | null> {
+        const result = await super.claim(options);
+        if (result) {
+          claimed.resolve();
+          await release.promise;
+        }
+        return result;
+      }
+    }
+    let runs = 0;
+    const Echo = define(
+      "slow-claim",
+      class {
+        run(): void {
+          runs += 1;
+        }
+      },
+    );
+    const store = new SlowStore();
+    const manager = create(store);
+    const execution = manager.wrap(Echo).run(undefined);
+    await claimed.promise;
+    const closing = manager.close();
+    release.resolve();
+    await closing;
+    expect(runs).toBe(0);
+    await expect(store.load(execution.id)).resolves.toMatchObject({
+      status: "pending",
+      activationId: undefined,
+    });
   });
 });

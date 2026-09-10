@@ -18,13 +18,13 @@ import type {
   ExecutionOptions,
   ExecutionRecord,
   RetryPolicy,
-  StoredRetryPolicy,
-  WorkflowConstructor,
-  WorkflowInputOf,
-  WorkflowOutputOf,
+  JobConstructor,
+  JobInputOf,
+  JobOutputOf,
+  WrappedJob,
 } from "./types.js";
 import { DurableWorker } from "./runtime/worker.js";
-import { WorkflowRegistry } from "./workflow/registry.js";
+import { JobRegistry } from "./job/registry.js";
 
 export interface ManagerOptions {
   readonly store: ExecutionStore;
@@ -37,12 +37,11 @@ export interface ManagerOptions {
 
 const MANAGER_CLOSED = new ManagerClosedError();
 
-/** Public composition root for workflow registration and durable execution handles. */
+/** Public composition root for reconstructable jobs and durable Runner execution handles. */
 export class Manager implements ExecutionHost, AsyncDisposable {
   private readonly store: ExecutionStore;
-  private readonly defaultRetry: StoredRetryPolicy;
   private readonly autoStart: boolean;
-  private readonly registry: WorkflowRegistry;
+  private readonly registry: JobRegistry;
   private readonly providers: AttemptProvider[] = [];
   private readonly worker: DurableWorker;
   private readonly submissions = new Set<Promise<unknown>>();
@@ -51,9 +50,8 @@ export class Manager implements ExecutionHost, AsyncDisposable {
 
   constructor(options: ManagerOptions) {
     this.store = options.store;
-    this.defaultRetry = normalizePolicy(options.retry);
     this.autoStart = options.autoStart ?? true;
-    this.registry = new WorkflowRegistry(this.defaultRetry);
+    this.registry = new JobRegistry(normalizePolicy(options.retry));
     this.worker = new DurableWorker({
       store: options.store,
       registry: this.registry,
@@ -70,7 +68,7 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     return this;
   }
 
-  register(...types: WorkflowConstructor[]): this {
+  register(...types: JobConstructor[]): this {
     this.assertOpen();
     if (this.registry.register(types)) {
       this.worker.wake();
@@ -78,25 +76,27 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     return this;
   }
 
-  run<Workflow extends WorkflowConstructor>(
-    type: Workflow,
-    input: WorkflowInputOf<Workflow>,
+  wrap<Job extends JobConstructor>(type: Job): WrappedJob<JobInputOf<Job>, JobOutputOf<Job>> {
+    this.register(type);
+    return {
+      run: (input, options) => this.run(type, input, options),
+      get: (id) => this.get(type, id),
+    };
+  }
+
+  run<Job extends JobConstructor>(
+    type: Job,
+    input: JobInputOf<Job>,
     options: ExecutionOptions = {},
-  ): Execution<WorkflowOutputOf<Workflow>> {
+  ): Execution<JobOutputOf<Job>> {
     this.assertOpen();
     const registered = this.registry.get(type);
-    const record = createExecutionRecord<Workflow>(
-      registered.graph,
-      input,
-      options,
-      this.defaultRetry,
-      Date.now(),
-    );
+    const record = createExecutionRecord(registered, input, options, Date.now());
 
     const ready = this.trackSubmission(
       this.store.create(record).then(async ({ execution }) => {
         if (
-          execution.workflow !== record.workflow ||
+          execution.job !== record.job ||
           execution.inputFingerprint !== record.inputFingerprint
         ) {
           throw new ExecutionIdentityConflictError(execution.id);
@@ -110,14 +110,11 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     return new ManagedExecution(record.id, this, ready);
   }
 
-  get<Workflow extends WorkflowConstructor>(
-    type: Workflow,
-    id: string,
-  ): Execution<WorkflowOutputOf<Workflow>> {
+  get<Job extends JobConstructor>(type: Job, id: string): Execution<JobOutputOf<Job>> {
     this.assertOpen();
     const registered = this.registry.get(type);
     const ready = this.load(id).then((execution) => {
-      if (execution.workflow !== registered.graph.name) {
+      if (execution.job !== registered.name) {
         throw new ExecutionIdentityConflictError(id);
       }
     });
@@ -156,7 +153,7 @@ export class Manager implements ExecutionHost, AsyncDisposable {
         case "pending":
         case "running":
         case "cancelling": {
-          const failure = this.worker.failureFor(id);
+          const failure = this.worker.failureFor(id, execution.attempt);
           if (failure) {
             throw failure.error;
           }

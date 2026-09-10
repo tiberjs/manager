@@ -1,186 +1,192 @@
 import { describe, expect, test } from "vitest";
 import { MemoryStore } from "../src/index.js";
-import type {
-  ClaimedNode,
-  ExecutionRecord,
-  NodeMutation,
-  NodeRecord,
-  SerializedError,
-} from "../src/index.js";
+import type { ClaimedExecution, ExecutionMutation, ExecutionRecord } from "../src/index.js";
 
-const failure: SerializedError = { name: "Error", message: "failed" };
-
-function node(id: string, dependencies: readonly string[] = [], retries = 1): NodeRecord {
+function record(id: string, retries = 1): ExecutionRecord {
   return {
     id,
-    dependencies,
-    status: dependencies.length === 0 ? "ready" : "blocked",
-    attempt: 0,
-    failures: 0,
-    retry: { retries, delayMs: 0, backoff: 2, maxDelayMs: 30_000 },
-    availableAt: 0,
-  };
-}
-
-function record(id: string, nodes: readonly NodeRecord[], outputNodeId: string): ExecutionRecord {
-  return {
-    id,
-    workflow: "store-test",
+    job: "store-test",
     input: null,
     inputFingerprint: "input",
-    outputNodeId,
     status: "pending",
-    nodes: Object.fromEntries(nodes.map((value) => [value.id, value])),
+    attempt: 0,
+    failures: 0,
+    retry: { retries, delayMs: 0, backoff: 2, maxDelayMs: 30000 },
+    availableAt: 0,
+    checkpoints: {},
     createdAt: 0,
     updatedAt: 0,
   };
 }
-
-async function claim(
-  store: MemoryStore,
-  workerId: string,
-  now: number,
-  leaseExpiresAt: number,
-): Promise<ClaimedNode> {
+async function claim(store: MemoryStore, now = 0, leaseExpiresAt = 10): Promise<ClaimedExecution> {
   const claimed = await store.claim({
-    workerId,
-    workflows: ["store-test"],
+    workerId: "worker",
+    jobs: ["store-test"],
     now,
     leaseExpiresAt,
   });
-  if (!claimed) {
-    throw new Error("Expected a ready node to be claimed.");
-  }
+  if (!claimed) throw new Error("Expected claimable job.");
   return claimed;
 }
-
-function mutation(claimed: ClaimedNode, now: number): NodeMutation {
-  return {
-    executionId: claimed.execution.id,
-    nodeId: claimed.nodeId,
-    activationId: claimed.activationId,
-    now,
-  };
+function mutation(claimed: ClaimedExecution, now = 1): ExecutionMutation {
+  return { executionId: claimed.execution.id, activationId: claimed.activationId, now };
 }
 
-describe("MemoryStore activation state", () => {
-  test("recovering one expired parallel node keeps the execution running", async () => {
+describe("MemoryStore job transitions", () => {
+  test("claim is exclusive and stale activations cannot overwrite recovered checkpoints or completion", async () => {
     const store = new MemoryStore();
-    await store.create(
-      record("parallel", [node("a"), node("b"), node("join", ["a", "b"])], "join"),
-    );
-
-    const expired = await claim(store, "worker-a", 0, 10);
-    const live = await claim(store, "worker-b", 0, 100);
-
+    await store.create(record("fenced"));
+    const stale = await claim(store);
+    await expect(
+      store.claim({ workerId: "other", jobs: ["store-test"], now: 1, leaseExpiresAt: 20 }),
+    ).resolves.toBeNull();
+    const oldCheckpoint = { ...mutation(stale), key: "effect", inputFingerprint: "value" };
+    await expect(store.beginCheckpoint(oldCheckpoint)).resolves.toEqual({ status: "execute" });
     await expect(store.recoverExpired(10)).resolves.toBe(1);
-    expect(await store.load("parallel")).toMatchObject({
-      status: "running",
-      nodes: {
-        a: {
-          status: "ready",
-          attempt: 1,
-          failures: 1,
-          availableAt: 10,
-          activationId: undefined,
-          workerId: undefined,
-          leaseExpiresAt: undefined,
-        },
-        b: {
-          status: "running",
-          activationId: live.activationId,
-          workerId: "worker-b",
-          leaseExpiresAt: 100,
-        },
-        join: { status: "blocked" },
-      },
-    });
-    expect(expired.nodeId).toBe("a");
-    expect(live.nodeId).toBe("b");
-  });
-
-  test("a recovered node rejects completion from its stale activation", async () => {
-    const store = new MemoryStore();
-    await store.create(record("fenced", [node("result")], "result"));
-
-    const stale = await claim(store, "old-worker", 0, 10);
-    await store.recoverExpired(10);
-    const current = await claim(store, "new-worker", 10, 100);
-
+    const fresh = await claim(store, 10, 100);
+    const checkpoint = { ...mutation(fresh, 11), key: "effect", inputFingerprint: "value" };
+    await expect(store.beginCheckpoint(checkpoint)).resolves.toEqual({ status: "execute" });
+    await expect(store.completeCheckpoint({ ...oldCheckpoint, now: 11 }, "stale")).resolves.toBe(
+      false,
+    );
     await expect(store.complete(mutation(stale, 11), "stale")).resolves.toBe(false);
-    await expect(store.complete(mutation(current, 12), "current")).resolves.toBe(true);
-    expect(await store.load("fenced")).toMatchObject({
+    await expect(store.completeCheckpoint(checkpoint, "fresh")).resolves.toBe(true);
+    await expect(store.complete(mutation(fresh, 12), "fresh")).resolves.toBe(true);
+    await expect(store.load("fenced")).resolves.toMatchObject({
       status: "completed",
-      result: "current",
-      nodes: {
-        result: {
-          status: "completed",
-          attempt: 2,
-          failures: 1,
-          result: "current",
-          activationId: undefined,
-        },
-      },
+      result: "fresh",
+      attempt: 2,
+      failures: 1,
+      activationId: undefined,
+      checkpoints: { effect: { status: "completed", result: "fresh" } },
     });
   });
 
-  test("terminal failure clears ownership from concurrently running siblings", async () => {
+  test("expired leases reject heartbeat and writes even before explicit recovery", async () => {
     const store = new MemoryStore();
-    await store.create(
-      record("failed", [node("a", [], 0), node("b", [], 0), node("join", ["a", "b"], 0)], "join"),
-    );
-
-    const failed = await claim(store, "worker-a", 0, 100);
-    const sibling = await claim(store, "worker-b", 0, 100);
-    await expect(store.fail({ ...mutation(failed, 1), error: failure, retryAt: 1 })).resolves.toBe(
-      true,
-    );
-
-    expect(await store.load("failed")).toMatchObject({
-      status: "failed",
-      nodes: {
-        a: { status: "failed", activationId: undefined, workerId: undefined },
-        b: {
-          status: "cancelled",
-          activationId: undefined,
-          workerId: undefined,
-          leaseExpiresAt: undefined,
-        },
-        join: { status: "cancelled" },
-      },
-    });
-    await expect(store.complete(mutation(sibling, 2), "late")).resolves.toBe(false);
+    await store.create(record("expired"));
+    const active = await claim(store);
+    const expired = mutation(active, 10);
+    await expect(store.heartbeat(expired, "worker", 100)).resolves.toBe("lost");
+    await expect(store.complete(expired, 42)).resolves.toBe(false);
+    await expect(
+      store.beginCheckpoint({ ...expired, key: "x", inputFingerprint: "x" }),
+    ).resolves.toEqual({ status: "lost" });
+    await expect(store.recoverExpired(10)).resolves.toBe(1);
   });
 
-  test("cancellation becomes terminal only after every running activation acknowledges it", async () => {
+  test("checkpoint reservations reject conflicting inputs and duplicate in-flight claims", async () => {
     const store = new MemoryStore();
-    await store.create(record("cancel", [node("a"), node("b"), node("join", ["a", "b"])], "join"));
+    await store.create(record("identity"));
+    const active = await claim(store);
+    const checkpoint = { ...mutation(active), key: "__proto__", inputFingerprint: "first" };
+    await expect(store.beginCheckpoint(checkpoint)).resolves.toEqual({ status: "execute" });
+    await expect(store.beginCheckpoint(checkpoint)).resolves.toEqual({ status: "busy" });
+    await expect(
+      store.beginCheckpoint({ ...checkpoint, inputFingerprint: "different" }),
+    ).resolves.toEqual({ status: "conflict" });
+    await expect(
+      store.completeCheckpoint({ ...checkpoint, inputFingerprint: "different" }, 42),
+    ).resolves.toBe(false);
+    await expect(store.releaseCheckpoint(checkpoint)).resolves.toBe(true);
+    await expect(
+      store.beginCheckpoint({ ...checkpoint, inputFingerprint: "different" }),
+    ).resolves.toEqual({ status: "conflict" });
+    await expect(store.beginCheckpoint(checkpoint)).resolves.toEqual({ status: "execute" });
+    await expect(store.completeCheckpoint(checkpoint, undefined)).resolves.toBe(true);
+    await expect(store.beginCheckpoint(checkpoint)).resolves.toEqual({
+      status: "completed",
+      result: undefined,
+    });
+    await expect(store.completeCheckpoint(checkpoint, "overwrite")).resolves.toBe(false);
+  });
 
-    const first = await claim(store, "worker-a", 0, 100);
-    const second = await claim(store, "worker-b", 0, 100);
+  test("completed checkpoints survive retries but running reservations lose ownership", async () => {
+    const store = new MemoryStore();
+    await store.create(record("retry"));
+    const active = await claim(store);
+    const completed = { ...mutation(active), key: "done", inputFingerprint: "input" };
+    await store.beginCheckpoint(completed);
+    await store.completeCheckpoint(completed, { value: 42 });
+    await store.beginCheckpoint({ ...completed, key: "unfinished" });
+    await store.fail({
+      ...mutation(active, 2),
+      error: { name: "Error", message: "retry" },
+      retryAt: 5,
+    });
+    await expect(
+      store.claim({ workerId: "worker", jobs: ["store-test"], now: 4, leaseExpiresAt: 100 }),
+    ).resolves.toBeNull();
+    const retry = await claim(store, 5, 100);
+    await expect(store.beginCheckpoint({ ...completed, ...mutation(retry, 6) })).resolves.toEqual({
+      status: "completed",
+      result: { value: 42 },
+    });
+    await expect(
+      store.beginCheckpoint({ ...completed, ...mutation(retry, 6), key: "unfinished" }),
+    ).resolves.toEqual({ status: "execute" });
+  });
+
+  test("cancellation rejects checkpoints and becomes terminal only on acknowledgement", async () => {
+    const store = new MemoryStore();
+    await store.create(record("cancel"));
+    const active = await claim(store);
     await store.cancel("cancel", { name: "AbortError", message: "stop" }, 1);
-    await expect(store.heartbeat(mutation(first, 2), "worker-a", 200)).resolves.toBe(
+    await expect(store.heartbeat(mutation(active, 2), "worker", 100)).resolves.toBe(
       "cancel-requested",
     );
-
-    await expect(store.acknowledgeCancellation(mutation(first, 2))).resolves.toBe(true);
-    await expect(store.load("cancel")).resolves.toMatchObject({
-      status: "cancelling",
-      nodes: {
-        a: { status: "cancelled", activationId: undefined },
-        b: { status: "running", activationId: second.activationId },
-        join: { status: "cancelled" },
-      },
-    });
-
-    await expect(store.acknowledgeCancellation(mutation(second, 3))).resolves.toBe(true);
+    await expect(store.load("cancel")).resolves.toMatchObject({ status: "cancelling" });
+    await expect(store.complete(mutation(active, 2), 42)).resolves.toBe(false);
+    await expect(
+      store.beginCheckpoint({ ...mutation(active, 2), key: "late", inputFingerprint: "input" }),
+    ).resolves.toEqual({ status: "lost" });
+    await expect(store.acknowledgeCancellation(mutation(active, 3))).resolves.toBe(true);
     await expect(store.load("cancel")).resolves.toMatchObject({
       status: "cancelled",
-      nodes: {
-        a: { status: "cancelled", activationId: undefined },
-        b: { status: "cancelled", activationId: undefined },
-        join: { status: "cancelled", activationId: undefined },
-      },
+      activationId: undefined,
+      workerId: undefined,
+      leaseExpiresAt: undefined,
+    });
+    await expect(store.release(mutation(active, 4))).resolves.toBe(false);
+  });
+
+  test("expired cancellation and exhausted retries terminate without leftover ownership", async () => {
+    const store = new MemoryStore();
+    await store.create(record("cancelled"));
+    const cancelled = await claim(store);
+    await store.cancel(cancelled.execution.id, { name: "AbortError", message: "stop" }, 1);
+    await store.create(record("failed", 0));
+    await claim(store);
+    await expect(store.recoverExpired(10)).resolves.toBe(2);
+    await expect(store.load("cancelled")).resolves.toMatchObject({
+      status: "cancelled",
+      activationId: undefined,
+    });
+    await expect(store.load("failed")).resolves.toMatchObject({
+      status: "failed",
+      failures: 1,
+      activationId: undefined,
+    });
+    await expect(store.recoverExpired(11)).resolves.toBe(0);
+  });
+
+  test("stored and replayed outputs are clone-isolated and serialization failure does not commit", async () => {
+    const store = new MemoryStore();
+    const source = record("isolation");
+    await store.create(source);
+    const active = await claim(store);
+    const checkpoint = { ...mutation(active), key: "value", inputFingerprint: "input" };
+    await store.beginCheckpoint(checkpoint);
+    await expect(store.completeCheckpoint(checkpoint, () => 42)).rejects.toThrow();
+    const result = { value: 42 };
+    await store.completeCheckpoint(checkpoint, result);
+    result.value = 0;
+    const first = await store.beginCheckpoint(checkpoint);
+    if (first.status !== "completed") throw new Error("Expected persisted checkpoint.");
+    (first.result as { value: number }).value = -1;
+    await expect(store.beginCheckpoint(checkpoint)).resolves.toEqual({
+      status: "completed",
+      result: { value: 42 },
     });
   });
 });

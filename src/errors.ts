@@ -20,10 +20,17 @@ export class ExecutionCancelledError extends Error {
   }
 }
 
-export class DuplicateWorkflowError extends Error {
+export class DuplicateJobError extends Error {
   constructor(name: string) {
-    super(`A workflow named ${JSON.stringify(name)} is already registered.`);
-    this.name = "DuplicateWorkflowError";
+    super(`A job named ${JSON.stringify(name)} is already registered.`);
+    this.name = "DuplicateJobError";
+  }
+}
+
+export class CheckpointIdentityConflictError extends Error {
+  constructor(executionId: string, key: string) {
+    super(`Checkpoint ${JSON.stringify(key)} in ${executionId} has different input.`);
+    this.name = "CheckpointIdentityConflictError";
   }
 }
 
@@ -42,8 +49,8 @@ export class ManagerClosedError extends Error {
 }
 
 export class ActivationLostError extends Error {
-  constructor(executionId: string, nodeId: string) {
-    super(`Activation for ${executionId}/${nodeId} lost ownership.`);
+  constructor(executionId: string) {
+    super(`Activation for ${executionId} lost ownership.`);
     this.name = "ActivationLostError";
   }
 }
@@ -72,5 +79,5 @@ export function serializeError(value: unknown, depth = 0): SerializedError {
 
 export const ACTIVATION_EXPIRED: SerializedError = {
   name: "ActivationExpiredError",
-  message: "The node activation lease expired before completion.",
+  message: "The job activation lease expired before completion.",
 };
