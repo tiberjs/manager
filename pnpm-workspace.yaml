@@ -1,0 +1,2 @@
+minimumReleaseAgeExclude:
+  - "@tiberjs/runner@0.1.1"
