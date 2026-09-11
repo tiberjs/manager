@@ -1,4 +1,5 @@
-import { describeToken, type InjectionToken } from "./tokens.js";
+import { describeToken, type InjectionToken } from "../tokens.js";
+import type { ResolutionFrame } from "./path.js";
 
 /** The root container's resolution attempts: `from` resolves `to`. */
 export interface ResolutionGraph {
@@ -18,10 +19,13 @@ export class ResolutionTracker {
   readonly #nodes = new Map<number, string>();
   readonly #outgoing = new Map<number, Set<number>>();
   readonly #incoming = new Map<number, Set<number>>();
-  readonly #frames: number[] = [];
 
-  /** Attributes a resolution to the open frame without opening one itself. */
-  record(owner: object, token: InjectionToken<unknown>): number {
+  /**
+   * Records a resolution as a dependency of the construction that requested
+   * it. The open frame comes from the tree's resolution path; this index keeps
+   * no stack of its own.
+   */
+  record(owner: object, token: InjectionToken<unknown>, parent?: ResolutionFrame): void {
     let ids = this.#idsByOwner.get(owner);
     if (!ids) {
       this.#idsByOwner.set(owner, (ids = new Map()));
@@ -34,21 +38,13 @@ export class ResolutionTracker {
       this.#nodes.set(id, describeToken(token));
     }
 
-    const parent = this.#frames[this.#frames.length - 1];
-    if (parent !== undefined && parent !== id) {
-      this.#link(parent, id);
+    // A node never depends on itself, and a removed owner's frame links nothing.
+    if (parent && (parent.owner !== owner || parent.token !== token)) {
+      const from = this.#idsByOwner.get(parent.owner)?.get(parent.token);
+      if (from !== undefined) {
+        this.#link(from, id);
+      }
     }
-
-    return id;
-  }
-
-  /** Nested resolutions become dependencies of `token` until the matching `exit()`. */
-  enter(owner: object, token: InjectionToken<unknown>): void {
-    this.#frames.push(this.record(owner, token));
-  }
-
-  exit(): void {
-    this.#frames.pop();
   }
 
   snapshot(): ResolutionGraph {

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Container } from "./container.js";
+import type { Container } from "../container.js";
 
 /**
  * The container bound as ambient while one of its resources is constructed or

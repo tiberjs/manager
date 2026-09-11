@@ -1,6 +1,6 @@
 import { contextKey, peekState, provide, withContext, type ContextKey } from "@tiberjs/runner";
-import { activeContainer } from "./active-container.js";
 import type { Container } from "./container.js";
+import { activeContainer } from "./resources/active-container.js";
 import type { Factory, InjectionToken } from "./tokens.js";
 
 /** The execution-context binding that carries a container across executions. */

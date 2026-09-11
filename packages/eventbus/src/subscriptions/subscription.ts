@@ -1,7 +1,5 @@
 import { addAbortListener } from "node:events";
-
-/** Notifications are delivered synchronously and cannot return asynchronous work. */
-export type EventListener<T> = (event: T) => undefined;
+import type { EventListener } from "../types.js";
 
 /** The membership a subscription removes itself from; it knows nothing of its layout. */
 export interface SubscriptionRemoval {
@@ -27,16 +25,23 @@ export class Subscription {
   }
 
   /**
-   * Removes once, from either direction: releasing the abort registration keeps a
-   * manual unsubscribe from retaining the signal, and dropping the membership
-   * reference keeps an abort from retaining the bus. Later calls do nothing.
+   * The subscriber-facing end, returned by `on` and invoked by an abort: leaves
+   * the membership and releases the abort registration. Removing once, from
+   * either direction, is what keeps a manual unsubscribe from retaining the
+   * signal and an abort from retaining the bus. Later calls do nothing.
    */
   readonly unsubscribe = (): void => {
     this.#detach()?.remove(this.#keyId, this);
   };
 
-  /** Retire a subscription its membership is already dropping. */
-  discard(): void {
+  /**
+   * The membership-facing end, for a membership that is already dropping this
+   * subscription: releases the abort registration without removing itself, so
+   * clearing never re-enters the membership being cleared. It leaves the
+   * membership entry standing, so it is never the way to cancel a subscription;
+   * every other caller wants `unsubscribe`. Later calls do nothing.
+   */
+  releaseWithoutRemoval(): void {
     this.#detach();
   }
 

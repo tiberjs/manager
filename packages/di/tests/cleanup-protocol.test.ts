@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { type ContainerObject, planCleanup } from "../src/cleanup-protocol.js";
+import { type ContainerObject, planCleanup } from "../src/resources/cleanup.js";
 import { DisposalConflictError } from "../src/errors.js";
 
 describe("cleanup protocol", () => {

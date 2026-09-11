@@ -1,10 +1,17 @@
 import { ContainerClosedError, ResolutionError } from "./errors.js";
-import { OwnershipRegistry } from "./ownership.js";
-import { ProviderRegistry } from "./provider-registry.js";
-import { ResolutionCycle } from "./resolution-cycle.js";
-import { ResolutionTracker, type ResolutionGraph } from "./resolution-graph.js";
-import { ResourceOwner } from "./resource-owner.js";
+import { ResolutionTracker, type ResolutionGraph } from "./resolution/graph.js";
+import { ResolutionPath } from "./resolution/path.js";
+import { ProviderRegistry } from "./resolution/providers.js";
+import { ResourceOwner } from "./resources/owner.js";
+import { OwnershipRegistry } from "./resources/ownership.js";
 import type { Factory, InjectionToken } from "./tokens.js";
+
+/**
+ * How far this container has travelled through its own teardown. `closing`
+ * lasts from the first asynchronous disposal until that drain settles;
+ * synchronous disposal of an untouched container skips straight to `disposed`.
+ */
+type ContainerPhase = "open" | "closing" | "disposed";
 
 /**
  * A hierarchical dependency container and resource owner.
@@ -17,21 +24,26 @@ export class Container {
   readonly #parent: Container | undefined;
   readonly #root: Container;
   readonly #providers = new ProviderRegistry();
-  readonly #cycle = new ResolutionCycle();
+  /** Shared with the whole tree: one construction chain, cycles and all. */
+  readonly #path: ResolutionPath;
   /** Diagnostics live on the root; a child records into its root's tracker. */
   #graph: ResolutionTracker | undefined;
   #resources: ResourceOwner | undefined;
-  #disposePromise: Promise<void> | undefined;
-  #disposed = false;
+  /** The single asynchronous teardown every later caller joins. */
+  #disposal: Promise<void> | undefined;
+  #phase: ContainerPhase = "open";
 
   constructor(parent?: Container) {
     this.#parent = parent;
     this.#root = parent ? parent.#root : this;
+    this.#path = parent ? parent.#path : new ResolutionPath();
   }
 
   get #owner(): ResourceOwner {
     if (!this.#resources) {
-      this.#assertNotDisposed();
+      // Teardown still registers cleanup, but a drained container never again
+      // builds an owner whose queue nothing would drain.
+      this.#admitRetainedAccess();
       this.#resources = new ResourceOwner(this, OwnershipRegistry.forRoot(this.#root));
     }
     return this.#resources;
@@ -39,7 +51,7 @@ export class Container {
 
   /** Undefined once the root is gone, so a surviving child cannot repopulate it. */
   get #tracker(): ResolutionTracker | undefined {
-    if (this.#root.#disposed || this.#root.#resources?.disposed) {
+    if (this.#root.#phase === "disposed") {
       return undefined;
     }
 
@@ -48,7 +60,7 @@ export class Container {
 
   /** A child container resolves application singletons through its parent. */
   child(): Container {
-    this.#assertOpen();
+    this.#admitNewAcquisition();
     return new Container(this);
   }
 
@@ -59,7 +71,7 @@ export class Container {
 
   /** Register a provider before the token is resolved here. */
   provide<T>(token: InjectionToken<T>, factory: Factory<T>): void {
-    this.#assertOpen();
+    this.#admitNewAcquisition();
     this.#providers.provide(token, factory);
   }
 
@@ -69,17 +81,20 @@ export class Container {
 
   /** Resolve local cache/provider, then ancestors; default classes live at root. */
   resolve<T>(token: InjectionToken<T>): T {
-    this.#assertNotDisposed();
     if (this.#providers.hasInstance(token)) {
-      this.#tracker?.record(this, token);
+      this.#admitRetainedAccess();
+      this.#tracker?.record(this, token, this.#path.current);
+
       return this.#providers.instance(token);
     }
 
     // Ancestors own their own admission; a closing child may still read singletons.
     if (!this.#providers.hasFactory(token) && this.#parent) {
+      this.#admitRetainedAccess();
       return this.#parent.resolve(token);
     }
-    this.#assertOpen();
+
+    this.#admitNewAcquisition();
 
     return this.#acquire(token, () => {
       const factory = this.#providers.factory(token);
@@ -103,17 +118,25 @@ export class Container {
     factory: Factory<T>,
     dispose?: (value: T) => unknown | Promise<unknown>,
   ): T {
-    this.#assertNotDisposed();
     if (this.#providers.hasInstance(token)) {
-      this.#tracker?.record(this, token);
+      this.#admitRetainedAccess();
+      this.#tracker?.record(this, token, this.#path.current);
+
       return this.#providers.instance(token);
     }
 
-    this.#assertOpen();
+    this.#admitNewAcquisition();
+
     return this.#acquire(token, factory, dispose);
   }
 
-  /** Register LIFO cleanup, including cleanup acquired during teardown itself. */
+  /**
+   * Register LIFO cleanup, including cleanup acquired during teardown itself.
+   *
+   * Deliberately blind to the container phase: a resource released mid-drain
+   * may still register its own cleanup, and only the queue knows whether it
+   * has anything left to run.
+   */
   defer(cleanup: () => unknown | Promise<unknown>): void {
     this.#owner.defer(cleanup);
   }
@@ -128,7 +151,7 @@ export class Container {
     if (this.#resources || this.#providers.hasInstances) {
       return false;
     }
-    if (!this.#disposed) {
+    if (this.#phase !== "disposed") {
       this.#clearResolution();
     }
     return true;
@@ -136,38 +159,35 @@ export class Container {
 
   /** Close acquisition synchronously, then clear resolution storage after teardown. */
   [Symbol.asyncDispose](): Promise<void> {
-    if (this.#disposed && !this.#resources) {
-      return (this.#disposePromise ??= Promise.resolve());
-    }
-    if (this.#disposePromise) {
-      return this.#disposePromise;
+    if (this.#phase === "open") {
+      this.#phase = "closing";
+      this.#disposal = this.#owner.close().finally(() => {
+        this.#clearResolution();
+      });
     }
 
-    this.#disposePromise = this.#owner.close().finally(() => {
-      this.#clearResolution();
-    });
-
-    return this.#disposePromise;
+    // Already disposed without a drain: the outcome is a settled join point too.
+    return (this.#disposal ??= Promise.resolve());
   }
 
-  #assertNotDisposed(): void {
-    if (this.#disposed) {
+  /** What this container already holds stays readable until the drain settles. */
+  #admitRetainedAccess(): void {
+    if (this.#phase === "disposed") {
       throw new ContainerClosedError("disposed");
     }
-    this.#resources?.assertNotDisposed();
   }
 
-  #assertOpen(): void {
-    if (this.#disposed) {
-      throw new ContainerClosedError("disposed");
+  /** Providers, children, and construction stop the moment teardown begins. */
+  #admitNewAcquisition(): void {
+    const phase = this.#phase;
+    if (phase !== "open") {
+      throw new ContainerClosedError(phase);
     }
-    this.#resources?.assertOpen();
   }
 
   #clearResolution(): void {
-    this.#disposed = true;
+    this.#phase = "disposed";
     this.#providers.clear();
-    this.#cycle.clear();
 
     if (this === this.#root) {
       this.#graph = undefined;
@@ -181,11 +201,9 @@ export class Container {
     factory: Factory<T>,
     dispose?: (value: T) => unknown | Promise<unknown>,
   ): T {
-    const graph = this.#tracker;
     // A cycle is still an attempt worth reporting, so record before guarding.
-    graph?.record(this, token);
-    this.#cycle.enter(token);
-    graph?.enter(this, token);
+    this.#tracker?.record(this, token, this.#path.current);
+    this.#path.enter(this, token);
 
     try {
       const value = this.#owner.construct(factory, dispose);
@@ -193,8 +211,7 @@ export class Container {
 
       return value;
     } finally {
-      this.#cycle.exit(token);
-      graph?.exit();
+      this.#path.exit();
     }
   }
 }

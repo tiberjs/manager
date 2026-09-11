@@ -31,6 +31,37 @@ unsubscribe();
 
 `emit` returns once the last listener has returned; `using` closes the bus at the end of the scope.
 
+## Sharing one bus across files
+
+Importing `EventBus` gives you the class, not an instance. There is no global bus, so publishers and subscribers in different files have to reach the same object, and two rules follow from that.
+
+**Define each key once and export it.** `eventKey()` mints a fresh identity per call, so two files that each call `eventKey("user.created")` are talking about two different events and will never see each other's emissions. Keep them in a module both sides import:
+
+```ts
+// events.ts
+export const UserCreated = eventKey<{ id: string }>("user.created");
+```
+
+**Share the instance the way you share any other dependency.** Pass it in, or register it with a container:
+
+```ts
+import { Container, inject, token } from "@tiberjs/di";
+
+const Bus = token<EventBus>("event-bus");
+
+await using root = new Container();
+root.provide(Bus, () => new EventBus({ onError: report }));
+
+class Publisher {
+  #bus = inject(Bus);
+  announce(id: string) {
+    this.#bus.emit(UserCreated, { id });
+  }
+}
+```
+
+Every consumer resolving `Bus` gets the same bus, and because `EventBus` is `Disposable` the container that built it also closes it: leaving the container's scope drops every subscription, and a later `emit` raises Runner's `LifecycleStateError`. Whoever constructs the bus decides its lifetime — the bus never registers itself anywhere.
+
 ## API
 
 ### `eventKey<T>(description): EventKey<T>`

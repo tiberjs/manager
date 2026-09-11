@@ -1,4 +1,4 @@
-import { DisposalConflictError } from "./errors.js";
+import { DisposalConflictError } from "../errors.js";
 
 /** Releases one resource; a returned promise is awaited during disposal. */
 export type Cleanup = () => unknown | Promise<unknown>;

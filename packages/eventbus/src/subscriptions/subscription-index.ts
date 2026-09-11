@@ -35,8 +35,9 @@ export class SubscriptionIndex implements SubscriptionRemoval {
     }
   }
 
-  count(keyId: symbol): number {
-    return this.#buckets?.get(keyId)?.subscribers.size ?? 0;
+  /** Whether a key has subscribers. Emptiness is this membership's fact to state. */
+  hasSubscribers(keyId: symbol): boolean {
+    return (this.#buckets?.get(keyId)?.subscribers.size ?? 0) > 0;
   }
 
   /**
@@ -60,7 +61,7 @@ export class SubscriptionIndex implements SubscriptionRemoval {
     this.#buckets = undefined;
     for (const bucket of buckets?.values() ?? []) {
       for (const subscription of bucket.subscribers) {
-        subscription.discard();
+        subscription.releaseWithoutRemoval();
       }
 
       bucket.subscribers.clear();

@@ -1,16 +1,19 @@
+import type { Container } from "../container.js";
+import { DisposalConflictError } from "../errors.js";
 import { activeContainer } from "./active-container.js";
-import { type Cleanup, planCleanup } from "./cleanup-protocol.js";
-import type { Container } from "./container.js";
-import { DisposalQueue } from "./disposal-queue.js";
-import { ContainerClosedError, DisposalConflictError } from "./errors.js";
-import type { DisposalOwner, OwnershipRegistry } from "./ownership.js";
+import { type Cleanup, planCleanup } from "./cleanup.js";
+import type { OwnershipRegistry } from "./ownership.js";
+import { DisposalQueue } from "./queue.js";
 
 /**
  * The resources one container owns: it binds the ambient container around
  * construction and teardown, claims each constructed value at most once, and
- * releases what it claimed in LIFO order. It resolves nothing.
+ * releases what it claimed in LIFO order.
+ *
+ * It resolves nothing and publishes no state. Its container owns the lifecycle
+ * phase, and each operation enforces only the invariant it can decide itself.
  */
-export class ResourceOwner implements DisposalOwner {
+export class ResourceOwner {
   readonly #queue: DisposalQueue;
 
   constructor(
@@ -20,23 +23,7 @@ export class ResourceOwner implements DisposalOwner {
     this.#queue = new DisposalQueue((cleanup) => activeContainer.run(container, cleanup));
   }
 
-  get disposed(): boolean {
-    return this.#queue.disposed;
-  }
-
-  /** Teardown has begun: no further resource may be admitted. */
-  assertOpen(): void {
-    if (this.#queue.closing) {
-      throw new ContainerClosedError(this.#queue.disposed ? "disposed" : "closing");
-    }
-  }
-
-  assertNotDisposed(): void {
-    if (this.#queue.disposed) {
-      throw new ContainerClosedError("disposed");
-    }
-  }
-
+  /** Admission belongs to the queue: only it knows whether it already drained. */
   defer(cleanup: Cleanup): void {
     this.#queue.defer(cleanup);
   }
@@ -52,8 +39,9 @@ export class ResourceOwner implements DisposalOwner {
     return value;
   }
 
+  /** Once drained, this owner is responsible for nothing it claimed. */
   close(): Promise<void> {
-    return this.#queue.close();
+    return this.#queue.close().finally(() => this.ownership.release(this));
   }
 
   #adopt<T>(value: T, explicitDispose?: (value: T) => unknown | Promise<unknown>): void {
@@ -65,7 +53,7 @@ export class ResourceOwner implements DisposalOwner {
     }
 
     const target = value as object;
-    if (this.ownership.liveOwner(target)) {
+    if (this.ownership.hasLiveOwner(target)) {
       // An alias of a live resource borrows it; a second disposer would double-release.
       if (explicitDispose) {
         throw new DisposalConflictError("already-owned");

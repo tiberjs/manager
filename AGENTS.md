@@ -114,19 +114,19 @@ DI owns object construction, per-container caching, parent lookup, cycle detecti
 
 ### Package boundary
 
+- `packages/di/src/index.ts`: the single public entry.
+- `packages/di/src/container.ts`: the hierarchical container composing the parts below: topology, parent lookup, and the one lifecycle phase that decides admission.
+- `packages/di/src/ambient.ts`: `currentContainer()`, `inject()`, `scoped()`, `onDispose()`, `withContainer()`, and the `ContainerKey` context binding.
 - `packages/di/src/tokens.ts`: token identity for classes and opaque tokens, and token descriptions for diagnostics.
 - `packages/di/src/errors.ts`: the named resolution, provider, disposal, and closed-container errors.
-- `packages/di/src/active-container.ts`: the ambient binding for the container currently constructing or tearing down.
-- `packages/di/src/cleanup-protocol.ts`: `ContainerObject` and cleanup discovery across explicit disposer, symbol disposers, and `onClose`.
-- `packages/di/src/ownership.ts`: one disposal owner per value across a container tree, including cached admission rejections.
-- `packages/di/src/disposal-queue.ts`: LIFO cleanup storage, single-run disposal, and aggregated independent failures.
-- `packages/di/src/resource-owner.ts`: per-container resource admission, construction binding, and teardown state.
-- `packages/di/src/provider-registry.ts`: a container's own factories and cached instances, and provider replacement rejection.
-- `packages/di/src/resolution-cycle.ts`: the per-container in-progress token guard that reports cycles before recursion.
-- `packages/di/src/resolution-graph.ts`: root-local resolution diagnostics and the public graph snapshot.
-- `packages/di/src/container.ts`: the hierarchical container composing those parts: parent lookup, caching, and the ownership boundary.
-- `packages/di/src/ambient.ts`: `currentContainer()`, `inject()`, `scoped()`, `onDispose()`, `withContainer()`, and the `ContainerKey` context binding.
-- `packages/di/src/index.ts`: the single public entry.
+- `packages/di/src/resolution/providers.ts`: a container's own factories and cached instances, and provider replacement rejection.
+- `packages/di/src/resolution/path.ts`: the one in-flight construction chain per container tree; reports a cycle when the same container/token pair reenters, and is the frame source for diagnostics.
+- `packages/di/src/resolution/graph.ts`: root-local resolution diagnostics and the public graph snapshot.
+- `packages/di/src/resources/owner.ts`: the resources one container owns, composing the parts below; publishes no lifecycle state.
+- `packages/di/src/resources/queue.ts`: LIFO cleanup storage and the single drain, owning only the rule that registration closes after that drain.
+- `packages/di/src/resources/cleanup.ts`: `ContainerObject` and cleanup discovery across explicit disposer, symbol disposers, and `onClose`.
+- `packages/di/src/resources/ownership.ts`: one disposal owner per value across a container tree, including cached admission rejections.
+- `packages/di/src/resources/active-container.ts`: the ambient binding for the container currently constructing or tearing down.
 - `packages/di/tests/`: hierarchy ownership and caching, cycle reporting, LIFO disposal and aggregated failures, use after close, ambient binding, and graph snapshots.
 
 ### Ownership and behavior
@@ -149,12 +149,13 @@ EventBus is a subscription map, not a process.
 
 ### Package boundary
 
-- `packages/eventbus/src/event-key.ts`: typed event identity; keys carry no behavior.
-- `packages/eventbus/src/subscription.ts`: one subscription's lifetime, including its abort registration and idempotent removal.
-- `packages/eventbus/src/subscription-index.ts`: per-key subscriber sets in registration order, with membership stable across an emission.
-- `packages/eventbus/src/failure-reporter.ts`: routes collected listener failures to `onError`, or asynchronously as unhandled errors.
-- `packages/eventbus/src/event-bus.ts`: the public bus: admission, synchronous delivery, and close.
 - `packages/eventbus/src/index.ts`: the single public entry.
+- `packages/eventbus/src/event-bus.ts`: the public bus: admission, synchronous delivery, and close.
+- `packages/eventbus/src/event-key.ts`: typed event identity and its factory; keys carry no behavior.
+- `packages/eventbus/src/types.ts`: the public listener, subscribe, option, and error-context contracts.
+- `packages/eventbus/src/subscriptions/subscription.ts`: one subscription's lifetime, including its abort registration and at-most-once release.
+- `packages/eventbus/src/subscriptions/subscription-index.ts`: per-key subscriber membership in registration order, stable across an emission.
+- `packages/eventbus/src/failures/reporter.ts`: routes collected listener failures to `onError`, or asynchronously as unhandled errors.
 - `packages/eventbus/tests/`: delivery order, revocation, snapshot stability during delivery, failure reporting, and use after close.
 
 ### Delivery and ownership

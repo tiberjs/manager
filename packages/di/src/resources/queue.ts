@@ -1,53 +1,35 @@
 import { combinedError } from "@tiberjs/runner";
-import type { Cleanup } from "./cleanup-protocol.js";
-import { ContainerClosedError } from "./errors.js";
+import { ContainerClosedError } from "../errors.js";
+import type { Cleanup } from "./cleanup.js";
 
 /** Runs one cleanup callback with the owner's ambient binding installed. */
 export type CleanupInvoker = (cleanup: Cleanup) => unknown;
 
 /**
- * LIFO cleanup storage drained exactly once.
+ * LIFO cleanup storage.
  *
  * Knows nothing about containers or ambient state: every callback runs through
- * the invoker its owner supplied.
+ * the invoker its owner supplied. It owns exactly one rule — cleanup may still
+ * be registered while the drain runs, but not after it finished, because
+ * nothing would run it — and it answers no question about that rule; its owner
+ * joins concurrent callers, so the drain is entered once.
  */
 export class DisposalQueue {
   #cleanups: Cleanup[] | undefined;
-  #closing: Promise<void> | undefined;
-  #disposed = false;
+  #drained = false;
 
   constructor(private readonly invoke: CleanupInvoker) {}
 
-  get closing(): boolean {
-    return this.#closing !== undefined;
-  }
-
-  get disposed(): boolean {
-    return this.#disposed;
-  }
-
   /** Cleanup registered while draining is drained too, still LIFO. */
   defer(cleanup: Cleanup): void {
-    if (this.#disposed) {
+    if (this.#drained) {
       throw new ContainerClosedError("disposed");
     }
     (this.#cleanups ??= []).push(cleanup);
   }
 
-  /** Every caller joins the single drain and observes its outcome. */
-  close(): Promise<void> {
-    if (this.#closing) {
-      return this.#closing;
-    }
-
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
-    this.#closing = promise;
-    void this.#drain().then(resolve, reject);
-
-    return promise;
-  }
-
-  async #drain(): Promise<void> {
+  /** Drains in reverse registration order, retaining independent failures. */
+  async close(): Promise<void> {
     // Yield past a synchronous factory that initiated disposal before returning its resource.
     await Promise.resolve();
 
@@ -60,7 +42,7 @@ export class DisposalQueue {
       }
     }
 
-    this.#disposed = true;
+    this.#drained = true;
     this.#cleanups = undefined;
 
     // Independent failures keep their identity, in drain order.

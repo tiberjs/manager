@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { FailureReporter } from "../src/failure-reporter.js";
+import { FailureReporter } from "../src/failures/reporter.js";
 
 /**
  * The unreported path rethrows in a microtask, which reaches the process as an

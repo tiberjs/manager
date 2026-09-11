@@ -1,14 +1,5 @@
 import { combinedError } from "@tiberjs/runner";
-
-/** Details identifying a failed event delivery. */
-export interface EventErrorContext {
-  readonly event: string;
-}
-
-export interface EventBusOptions {
-  /** Synchronous diagnostics; any asynchronous work remains caller-owned. */
-  readonly onError?: (error: unknown, context: EventErrorContext) => undefined;
-}
+import type { EventBusOptions } from "../types.js";
 
 /**
  * Routes the failures one emission collected, never back at the publisher.

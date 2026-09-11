@@ -8,7 +8,7 @@ export {
   scoped,
   withContainer,
 } from "./ambient.js";
-export type { ContainerObject } from "./cleanup-protocol.js";
+export type { ContainerObject } from "./resources/cleanup.js";
 export { Container } from "./container.js";
 export {
   ContainerClosedError,
@@ -16,6 +16,6 @@ export {
   ProviderConflictError,
   ResolutionError,
 } from "./errors.js";
-export type { ResolutionGraph } from "./resolution-graph.js";
+export type { ResolutionGraph } from "./resolution/graph.js";
 export { token } from "./tokens.js";
 export type { Constructor, Factory, InjectionToken, Token } from "./tokens.js";

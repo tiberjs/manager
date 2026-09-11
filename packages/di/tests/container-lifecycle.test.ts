@@ -209,6 +209,31 @@ describe("Container resolution", () => {
     await root[Symbol.asyncDispose]();
   });
 
+  test("cycles are still reported after the root's diagnostics are gone", async () => {
+    const root = new Container();
+    const child = root.child();
+    const cyclic = token<object>("cyclic");
+    child.provide(cyclic, () => ({ borrowed: inject(cyclic) }));
+
+    await root[Symbol.asyncDispose]();
+
+    expect(root.resolutionGraph()).toStrictEqual({ nodes: [], edges: [] });
+
+    let cycleFailure: unknown;
+    try {
+      child.resolve(cyclic);
+    } catch (error) {
+      cycleFailure = error;
+    }
+
+    expect(cycleFailure).toBeInstanceOf(ResolutionError);
+    expect((cycleFailure as ResolutionError).reason).toBe("circular-dependency");
+    expect((cycleFailure as ResolutionError).token).toBe(cyclic);
+    expect(child.resolutionGraph()).toStrictEqual({ nodes: [], edges: [] });
+
+    await child[Symbol.asyncDispose]();
+  });
+
   test("undefined factory failures are not mistaken for a value or retained in the cache", async () => {
     const container = new Container();
     const resource = token<object>("resource");

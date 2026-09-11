@@ -1,5 +1,5 @@
-import { ProviderConflictError } from "./errors.js";
-import type { Factory, InjectionToken } from "./tokens.js";
+import { ProviderConflictError } from "../errors.js";
+import type { Factory, InjectionToken } from "../tokens.js";
 
 /** One container's providers and the instances it has constructed. */
 export class ProviderRegistry {

@@ -1,13 +1,9 @@
 import { LifecycleStateError } from "@tiberjs/runner";
 import type { EventKey } from "./event-key.js";
-import { FailureReporter, type EventBusOptions } from "./failure-reporter.js";
-import { Subscription, type EventListener } from "./subscription.js";
-import { SubscriptionIndex } from "./subscription-index.js";
-
-export interface EventSubscribeOptions {
-  /** Aborting unsubscribes. An already-aborted signal subscribes nothing. */
-  readonly signal?: AbortSignal;
-}
+import { FailureReporter } from "./failures/reporter.js";
+import { Subscription } from "./subscriptions/subscription.js";
+import { SubscriptionIndex } from "./subscriptions/subscription-index.js";
+import type { EventBusOptions, EventListener, EventSubscribeOptions } from "./types.js";
 
 const noop = (): void => {};
 
@@ -56,7 +52,7 @@ export class EventBus implements Disposable {
   }
 
   hasListeners<T>(key: EventKey<T>): boolean {
-    return this.#subscriptions.count(key.id) > 0;
+    return this.#subscriptions.hasSubscribers(key.id);
   }
 
   emit<T>(key: EventKey<T>, event: NoInfer<T>): void {
