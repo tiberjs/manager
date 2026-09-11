@@ -1,0 +1,44 @@
+{
+  "name": "@tiberjs/di",
+  "version": "0.1.0",
+  "description": "Hierarchical dependency container and resource ownership for tiberjs.",
+  "author": "miinhho",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "tiberjs-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    },
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rspack build --config ../../rspack.config.mjs && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm -w exec vitest run --project @tiberjs/di"
+  },
+  "dependencies": {
+    "@tiberjs/runner": "^0.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tiberjs/manager.git",
+    "directory": "packages/di"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

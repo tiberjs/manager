@@ -1,30 +1,14 @@
 {
-  "name": "@tiberjs/manager",
-  "version": "0.1.0",
-  "description": "Durable Runner job wrapping with dynamic checkpoints, retries, cancellation, and recovery.",
-  "author": "miinhho",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/tiberjs/manager.git"
-  },
-  "files": [
-    "dist"
-  ],
+  "name": "tiberjs-manager-workspace",
+  "private": true,
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
-  "publishConfig": {
-    "access": "public"
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": ">=24"
   },
   "scripts": {
-    "build": "rspack build && tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
     "lint": "oxlint --deny-warnings .",
     "lint:fix": "oxlint --fix --deny-warnings .",
     "format": "oxfmt --write .",
@@ -32,9 +16,6 @@
     "check": "pnpm lint && pnpm format:check && pnpm typecheck",
     "test": "vitest run",
     "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@tiberjs/runner": "^0.1.1"
   },
   "devDependencies": {
     "@rspack/cli": "2.2.3",
@@ -44,9 +25,5 @@
     "oxlint": "1.82.0",
     "typescript": "^5",
     "vitest": "^5.0.0"
-  },
-  "engines": {
-    "node": ">=24"
-  },
-  "packageManager": "pnpm@12.3.4"
+  }
 }
