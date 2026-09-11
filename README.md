@@ -164,7 +164,8 @@ console.log(db.config.url);
 ```
 
 - `token<T>(description)` creates a typed token for a value that needs a factory. A class is its own token and is default-constructed when no provider is registered.
-- `provide(token, factory)` registers a factory; the factory receives the resolving container.
+- `provide(token, factory)` registers a factory; the factory receives the resolving container. Register before the token is resolved here: replacing a factory whose instance this container already handed out raises `ProviderConflictError`, because the cached instance would silently win. Override in a `child()` instead.
+- `has(token)` reports an explicit provider or a cached instance in this container or an ancestor. It answers `false` for a class that has no provider, even though `resolve()` will default-construct it.
 - `resolve(token)` constructs on first use and returns the cached instance afterwards. A resolution cycle is reported as an error naming the participating tokens.
 - `inject(token)` resolves from the container that is currently constructing—typically in a field initializer or constructor body—so classes stay free of container plumbing.
 - `child()` creates a container that sees its parent's providers. A token is built and cached by the nearest container that provides it—a class with no provider ends up at the root—so a child owns, and disposes, only what it provides itself. A child never mutates its parent.
@@ -216,7 +217,9 @@ bus.on(UserCreated, (user) => void fork(() => sendWelcomeEmail(user.id)));
 
 `fork` needs an active Runner job, and the listener has one whenever the publisher emits from inside a job. The bus itself never starts, joins, or awaits anything.
 
-A listener that throws never stops the other listeners and never changes the publisher's result. Failures from one `emit` are collected and reported once to `onError`, or surfaced as an unhandled error when no reporter is configured.
+A listener that throws never stops the other listeners and never changes the publisher's result. Failures from one `emit` are collected and reported once to `onError`.
+
+**Supply `onError` in any long-lived process.** Without a reporter a listener failure is rethrown from a microtask, which reaches Node as an `uncaughtException` and, with no handler installed, terminates the process. That is deliberate—silently swallowing an observer's failure is worse—but it means a bus that owns application notifications should always be constructed with a reporter.
 
 ## Development
 

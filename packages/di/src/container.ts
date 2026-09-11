@@ -1,4 +1,4 @@
-import { ContainerClosedError, ResolutionError } from "./errors.js";
+import { ContainerClosedError, ProviderConflictError, ResolutionError } from "./errors.js";
 import { ResolutionTracker, type ResolutionGraph } from "./resolution-graph.js";
 import { ResourceLifecycle } from "./resources.js";
 import type { Factory, InjectionToken } from "./tokens.js";
@@ -53,8 +53,16 @@ export class Container {
     return this.#root.#graph?.snapshot() ?? { nodes: [], edges: [] };
   }
 
+  /**
+   * Register a provider before the token is resolved here. Replacing a factory
+   * whose instance this container already handed out is rejected, because the
+   * cached instance would silently win; override in a child container instead.
+   */
   provide<T>(token: InjectionToken<T>, factory: Factory<T>): void {
     this.#assertOpen();
+    if (this.#instances?.has(token)) {
+      throw new ProviderConflictError(token);
+    }
     (this.#factories ??= new Map()).set(token, factory as Factory<unknown>);
   }
 

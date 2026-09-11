@@ -1,12 +1,4 @@
-import {
-  contextKey,
-  hasContext,
-  peekState,
-  provide,
-  use,
-  withContext,
-  type ContextKey,
-} from "@tiberjs/runner";
+import { contextKey, peekState, provide, withContext, type ContextKey } from "@tiberjs/runner";
 import type { Container } from "./container.js";
 import { activeContainer } from "./resources.js";
 import type { InjectionToken } from "./tokens.js";
@@ -21,8 +13,9 @@ export function currentContainer(): Container {
     return constructing;
   }
 
-  // hasContext() requires an active execution, so peek before asking for one.
-  const bound = peekState() && hasContext(ContainerKey) ? use(ContainerKey) : undefined;
+  // One state read and one frame walk: inject() runs on request paths, and a
+  // bound container is never undefined, so absence needs no separate probe.
+  const bound = peekState()?.context.values.get(ContainerKey.id) as Container | undefined;
   if (!bound) {
     throw new Error(
       "No active container. This API requires construction, disposal, withContainer(), or an execution bound to ContainerKey.",

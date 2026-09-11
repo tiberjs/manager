@@ -28,6 +28,16 @@ export class ContainerClosedError extends Error {
   }
 }
 
+/** A provider cannot replace an instance this container has already handed out. */
+export class ProviderConflictError extends Error {
+  constructor(readonly token: InjectionToken<unknown>) {
+    super(
+      `"${describeToken(token)}" is already resolved in this container. Register providers before resolving, or override the token in a child container.`,
+    );
+    this.name = "ProviderConflictError";
+  }
+}
+
 /** An object must have exactly one disposal owner and one automatic close protocol. */
 export class DisposalConflictError extends Error {
   constructor(readonly reason: "multiple-hooks" | "already-owned") {

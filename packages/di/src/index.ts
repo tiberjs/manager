@@ -9,7 +9,12 @@ export {
   withContainer,
 } from "./ambient.js";
 export { Container } from "./container.js";
-export { ContainerClosedError, DisposalConflictError, ResolutionError } from "./errors.js";
+export {
+  ContainerClosedError,
+  DisposalConflictError,
+  ProviderConflictError,
+  ResolutionError,
+} from "./errors.js";
 export type { ResolutionGraph } from "./resolution-graph.js";
 export type { ContainerObject } from "./resources.js";
 export { token } from "./tokens.js";

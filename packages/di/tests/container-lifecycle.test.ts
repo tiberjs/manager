@@ -6,6 +6,7 @@ import {
   DisposalConflictError,
   inject,
   onDispose,
+  ProviderConflictError,
   ResolutionError,
   scoped,
   token,
@@ -48,6 +49,46 @@ describe("Container resolution", () => {
     expect(child.has(Config)).toBe(true);
     expect(root.has(Service)).toBe(true);
     expect(new Container().has(Config)).toBe(false);
+
+    await child[Symbol.asyncDispose]();
+    await root[Symbol.asyncDispose]();
+  });
+
+  test("a provider cannot silently lose to an instance this container already resolved", async () => {
+    const root = new Container();
+    const Config = token<{ tenant: string }>("config");
+    let replacements = 0;
+
+    class Service {
+      readonly config = inject(Config);
+    }
+
+    root.provide(Config, () => ({ tenant: "first" }));
+    // Replacing an unresolved provider is ordinary configuration.
+    root.provide(Config, () => ({ tenant: "second" }));
+
+    const service = root.resolve(Service);
+    expect(service.config.tenant).toBe("second");
+
+    const replace = () =>
+      root.provide(Config, () => {
+        replacements++;
+        return { tenant: "ignored" };
+      });
+
+    expect(replace).toThrowError(ProviderConflictError);
+    expect(() => root.provide(Service, () => new Service())).toThrowError(ProviderConflictError);
+    // The rejection changes nothing: the resolved graph and later resolution stand.
+    expect(root.resolve(Config)).toBe(service.config);
+    expect(root.resolve(Service)).toBe(service);
+    expect(replacements).toBe(0);
+
+    // A child owns its own instance, so overriding there remains the supported path.
+    const child = root.child();
+    child.provide(Config, () => ({ tenant: "child" }));
+
+    expect(child.resolve(Config).tenant).toBe("child");
+    expect(root.resolve(Config).tenant).toBe("second");
 
     await child[Symbol.asyncDispose]();
     await root[Symbol.asyncDispose]();
