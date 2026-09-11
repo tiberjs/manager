@@ -101,10 +101,13 @@ export class Container {
     });
   }
 
-  /** Acquire inline resources once per container, with explicit or automatic disposal. */
+  /**
+   * Acquire inline resources once per container, with explicit or automatic
+   * disposal. Like a provider factory, `factory` receives this container.
+   */
   use<T>(
     token: InjectionToken<T>,
-    factory: () => T,
+    factory: Factory<T>,
     dispose?: (value: T) => unknown | Promise<unknown>,
   ): T {
     this.#assertNotDisposed();
@@ -183,7 +186,7 @@ export class Container {
 
   #acquire<T>(
     token: InjectionToken<T>,
-    factory: () => T,
+    factory: Factory<T>,
     dispose?: (value: T) => unknown | Promise<unknown>,
   ): T {
     const graph = this.#resolutionTracker;

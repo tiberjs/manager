@@ -111,6 +111,27 @@ describe("Container resolution", () => {
     await root[Symbol.asyncDispose]();
   });
 
+  test("inline acquisition receives the acquiring container, like a provider factory", async () => {
+    const root = new Container();
+    const child = root.child();
+    // Wrapped: a bare Container is itself AsyncDisposable and would be adopted.
+    const Inline = token<{ container: Container }>("inline");
+    const Ambient = token<{ container: Container }>("ambient");
+
+    expect(child.use(Inline, (container) => ({ container })).container).toBe(child);
+    // A cached value is returned without consulting the factory again.
+    expect(child.use(Inline, () => ({ container: root })).container).toBe(child);
+
+    class Service {
+      readonly acquired = scoped(Ambient, (container) => ({ container }));
+    }
+
+    expect(root.resolve(Service).acquired.container).toBe(root);
+
+    await child[Symbol.asyncDispose]();
+    await root[Symbol.asyncDispose]();
+  });
+
   test("a missing provider identifies the exact token and can be registered after failure", async () => {
     const container = new Container();
     const available = token<object>("store");

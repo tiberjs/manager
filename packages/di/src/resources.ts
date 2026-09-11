@@ -65,8 +65,11 @@ export class ResourceLifecycle {
   }
 
   /** Construct with ambient resolution bound, then take disposal ownership. */
-  construct<T>(factory: () => T, dispose?: (value: T) => unknown | Promise<unknown>): T {
-    const value = activeContainer.run(this.container, factory);
+  construct<T>(
+    factory: (container: Container) => T,
+    dispose?: (value: T) => unknown | Promise<unknown>,
+  ): T {
+    const value = activeContainer.run(this.container, factory, this.container);
     this.#adopt(value, dispose);
 
     return value;

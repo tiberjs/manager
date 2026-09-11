@@ -110,15 +110,26 @@ export class EventBus implements Disposable {
       return;
     }
 
-    // Snapshot membership before user code can subscribe, unsubscribe, re-emit,
-    // or close the bus. Independent listeners all run, even after a failure.
-    const snapshot = [...subscribers];
     let failures: unknown[] | undefined;
-    for (const subscription of snapshot) {
+    if (subscribers.size === 1) {
+      // A sole subscriber is already a stable reference, so the snapshot copy
+      // that protects a multi-listener walk buys nothing here.
+      const [only] = subscribers;
       try {
-        subscription.listener(event as never);
+        only!.listener(event as never);
       } catch (error) {
-        (failures ??= []).push(error);
+        failures = [error];
+      }
+    } else {
+      // Snapshot membership before user code can subscribe, unsubscribe,
+      // re-emit, or close the bus. Every listener runs, even after a failure.
+      const snapshot = [...subscribers];
+      for (const subscription of snapshot) {
+        try {
+          subscription.listener(event as never);
+        } catch (error) {
+          (failures ??= []).push(error);
+        }
       }
     }
 

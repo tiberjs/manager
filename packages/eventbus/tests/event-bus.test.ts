@@ -112,6 +112,26 @@ test("subscription changes and reentrant emissions only affect later emissions",
   expect(order).toStrictEqual(["a:1", "a:2", "c:2", "d:2", "b:1", "c:1", "a:3", "c:3", "d:3"]);
 });
 
+test("a sole subscriber still sees only the membership present when delivery began", () => {
+  using bus = new EventBus();
+  const key = eventKey<number>("changed");
+  const order: string[] = [];
+
+  const off = bus.on(key, (value) => {
+    order.push(`only:${value}`);
+    // Both mutations happen while this single listener is mid-delivery.
+    off();
+    bus.on(key, (next) => {
+      order.push(`late:${next}`);
+    });
+  });
+
+  bus.emit(key, 1);
+  bus.emit(key, 2);
+
+  expect(order).toStrictEqual(["only:1", "late:2"]);
+});
+
 test("closing during delivery seals the bus without corrupting the in-flight emission", () => {
   const bus = new EventBus();
   const key = eventKey<void>("changed");

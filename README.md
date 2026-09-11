@@ -170,6 +170,7 @@ console.log(db.config.url);
 - `inject(token)` resolves from the container that is currently constructing—typically in a field initializer or constructor body—so classes stay free of container plumbing.
 - `child()` creates a container that sees its parent's providers. A token is built and cached by the nearest container that provides it—a class with no provider ends up at the root—so a child owns, and disposes, only what it provides itself. A child never mutates its parent.
 - `onDispose(cleanup)` registers cleanup on the container constructing the current object. Disposal is LIFO over that container's own resources, runs once, and never reaches into a parent or a sibling.
+- `use(token, factory, dispose?)`—or ambient `scoped(...)`—acquires an inline resource once per container. Its factory receives the acquiring container, exactly like a provider factory.
 - `await using`—or `await container[Symbol.asyncDispose]()`—disposes the container. Independent cleanup failures are reported together; afterwards every use raises `ContainerClosedError`.
 
 There is no startup or readiness barrier: DI never eagerly instantiates, never orders initialization for you, and has no `start()`. Order initialization yourself with ordinary awaited code before the work that depends on it, and run anything long-lived in your own Runner job.

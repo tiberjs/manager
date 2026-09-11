@@ -1,7 +1,7 @@
 import { contextKey, peekState, provide, withContext, type ContextKey } from "@tiberjs/runner";
 import type { Container } from "./container.js";
 import { activeContainer } from "./resources.js";
-import type { InjectionToken } from "./tokens.js";
+import type { Factory, InjectionToken } from "./tokens.js";
 
 /** The execution-context binding that carries a container across executions. */
 export const ContainerKey: ContextKey<Container> = contextKey<Container>("di.container");
@@ -33,7 +33,7 @@ export function inject<T>(token: InjectionToken<T>): T {
 /** Acquire a resource once per container and release it when that container closes. */
 export function scoped<T>(
   token: InjectionToken<T>,
-  factory: () => T,
+  factory: Factory<T>,
   dispose?: (value: T) => unknown | Promise<unknown>,
 ): T {
   return currentContainer().use(token, factory, dispose);
