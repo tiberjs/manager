@@ -14,6 +14,8 @@ manager/
 - `packages/di` (`@tiberjs/di`): a hierarchical container that constructs objects, caches them per container, resolves through parents, detects cycles, and disposes the resources it owns.
 - `packages/eventbus` (`@tiberjs/eventbus`): a typed subscription map delivering in-process notifications synchronously to its subscribers.
 
+Each package owns a `README.md` that documents it for consumers; the root `README.md` is only a workspace index. This file is the contributor contract — keep user-facing usage prose in the package READMEs, and update a package's README with any change to its public surface.
+
 Each package is independent. Consume Runner through published exports, never sibling source or a parent workspace link; check the installed Runner package's exports, not the latest sibling source API. No package depends on server, HTTP, WebSocket, gRPC, brokers, queue, cron, or transport packages. `di` and `eventbus` must not depend on `durable`, and `durable` must not depend on them until it is migrated. Cross-package reuse inside this workspace goes through package exports as well.
 
 ## Runner versions and the pre-release pin
@@ -110,6 +112,25 @@ MemoryStore is a synchronous atomic in-memory reference adapter, not production 
 
 DI owns object construction, per-container caching, parent lookup, cycle detection, and disposal of the resources it owns. That is the whole mandate.
 
+### Package boundary
+
+- `packages/di/src/tokens.ts`: token identity for classes and opaque tokens, and token descriptions for diagnostics.
+- `packages/di/src/errors.ts`: the named resolution, provider, disposal, and closed-container errors.
+- `packages/di/src/active-container.ts`: the ambient binding for the container currently constructing or tearing down.
+- `packages/di/src/cleanup-protocol.ts`: `ContainerObject` and cleanup discovery across explicit disposer, symbol disposers, and `onClose`.
+- `packages/di/src/ownership.ts`: one disposal owner per value across a container tree, including cached admission rejections.
+- `packages/di/src/disposal-queue.ts`: LIFO cleanup storage, single-run disposal, and aggregated independent failures.
+- `packages/di/src/resource-owner.ts`: per-container resource admission, construction binding, and teardown state.
+- `packages/di/src/provider-registry.ts`: a container's own factories and cached instances, and provider replacement rejection.
+- `packages/di/src/resolution-cycle.ts`: the per-container in-progress token guard that reports cycles before recursion.
+- `packages/di/src/resolution-graph.ts`: root-local resolution diagnostics and the public graph snapshot.
+- `packages/di/src/container.ts`: the hierarchical container composing those parts: parent lookup, caching, and the ownership boundary.
+- `packages/di/src/ambient.ts`: `currentContainer()`, `inject()`, `scoped()`, `onDispose()`, `withContainer()`, and the `ContainerKey` context binding.
+- `packages/di/src/index.ts`: the single public entry.
+- `packages/di/tests/`: hierarchy ownership and caching, cycle reporting, LIFO disposal and aggregated failures, use after close, ambient binding, and graph snapshots.
+
+### Ownership and behavior
+
 - It owns no execution: no Job, no TaskGroup, no cancellation, no signals, no retries, no scheduling. A container is a data structure that builds objects; anything that runs belongs to a caller-owned Runner Job.
 - It owns no events. Wire notifications with `@tiberjs/eventbus` or an explicit callback; the container never broadcasts construction or disposal.
 - It owns no startup or readiness barrier. Runner's `onStart`/`start()`/`sealStartup()`/`startupPending`/`StartupContext` concept is deliberately removed, not pending reimplementation: initialization ordering is the caller's, expressed as ordinary awaited code before the work that needs it. Do not reintroduce a lifecycle phase, an eager-instantiation pass, or an `isReady` flag.
@@ -125,6 +146,18 @@ DI owns object construction, per-container caching, parent lookup, cycle detecti
 ## `@tiberjs/eventbus`
 
 EventBus is a subscription map, not a process.
+
+### Package boundary
+
+- `packages/eventbus/src/event-key.ts`: typed event identity; keys carry no behavior.
+- `packages/eventbus/src/subscription.ts`: one subscription's lifetime, including its abort registration and idempotent removal.
+- `packages/eventbus/src/subscription-index.ts`: per-key subscriber sets in registration order, with membership stable across an emission.
+- `packages/eventbus/src/failure-reporter.ts`: routes collected listener failures to `onError`, or asynchronously as unhandled errors.
+- `packages/eventbus/src/event-bus.ts`: the public bus: admission, synchronous delivery, and close.
+- `packages/eventbus/src/index.ts`: the single public entry.
+- `packages/eventbus/tests/`: delivery order, revocation, snapshot stability during delivery, failure reporting, and use after close.
+
+### Delivery and ownership
 
 - `emit` is synchronous: it walks the current subscriber snapshot and calls each listener inline. There is no mailbox, no queue, no hidden Job, no scheduling, no backpressure, and no async listener contract. The publisher's execution context is preserved because nothing is deferred.
 - A listener that needs to await or run in the background forks its own caller-owned Runner Job. The bus never keeps work alive, never joins anything, and never awaits a listener's return value.

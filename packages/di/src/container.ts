@@ -1,6 +1,9 @@
-import { ContainerClosedError, ProviderConflictError, ResolutionError } from "./errors.js";
+import { ContainerClosedError, ResolutionError } from "./errors.js";
+import { OwnershipRegistry } from "./ownership.js";
+import { ProviderRegistry } from "./provider-registry.js";
+import { ResolutionCycle } from "./resolution-cycle.js";
 import { ResolutionTracker, type ResolutionGraph } from "./resolution-graph.js";
-import { ResourceLifecycle } from "./resources.js";
+import { ResourceOwner } from "./resource-owner.js";
 import type { Factory, InjectionToken } from "./tokens.js";
 
 /**
@@ -13,11 +16,11 @@ import type { Factory, InjectionToken } from "./tokens.js";
 export class Container {
   readonly #parent: Container | undefined;
   readonly #root: Container;
+  readonly #providers = new ProviderRegistry();
+  readonly #cycle = new ResolutionCycle();
+  /** Diagnostics live on the root; a child records into its root's tracker. */
   #graph: ResolutionTracker | undefined;
-  #resources: ResourceLifecycle | undefined;
-  #instances: Map<InjectionToken<unknown>, unknown> | undefined;
-  #factories: Map<InjectionToken<unknown>, Factory<unknown>> | undefined;
-  #resolving: Set<InjectionToken<unknown>> | undefined;
+  #resources: ResourceOwner | undefined;
   #disposePromise: Promise<void> | undefined;
   #disposed = false;
 
@@ -26,15 +29,16 @@ export class Container {
     this.#root = parent ? parent.#root : this;
   }
 
-  get #resourceLifecycle(): ResourceLifecycle {
+  get #owner(): ResourceOwner {
     if (!this.#resources) {
       this.#assertNotDisposed();
-      this.#resources = new ResourceLifecycle(this, this.#root);
+      this.#resources = new ResourceOwner(this, OwnershipRegistry.forRoot(this.#root));
     }
     return this.#resources;
   }
 
-  get #resolutionTracker(): ResolutionTracker | undefined {
+  /** Undefined once the root is gone, so a surviving child cannot repopulate it. */
+  get #tracker(): ResolutionTracker | undefined {
     if (this.#root.#disposed || this.#root.#resources?.disposed) {
       return undefined;
     }
@@ -53,45 +57,34 @@ export class Container {
     return this.#root.#graph?.snapshot() ?? { nodes: [], edges: [] };
   }
 
-  /**
-   * Register a provider before the token is resolved here. Replacing a factory
-   * whose instance this container already handed out is rejected, because the
-   * cached instance would silently win; override in a child container instead.
-   */
+  /** Register a provider before the token is resolved here. */
   provide<T>(token: InjectionToken<T>, factory: Factory<T>): void {
     this.#assertOpen();
-    if (this.#instances?.has(token)) {
-      throw new ProviderConflictError(token);
-    }
-    (this.#factories ??= new Map()).set(token, factory as Factory<unknown>);
+    this.#providers.provide(token, factory);
   }
 
   has(token: InjectionToken<unknown>): boolean {
-    return (
-      (this.#instances?.has(token) ?? false) ||
-      (this.#factories?.has(token) ?? false) ||
-      (this.#parent?.has(token) ?? false)
-    );
+    return this.#providers.has(token) || (this.#parent?.has(token) ?? false);
   }
 
   /** Resolve local cache/provider, then ancestors; default classes live at root. */
   resolve<T>(token: InjectionToken<T>): T {
     this.#assertNotDisposed();
-    if (this.#instances?.has(token)) {
-      this.#resolutionTracker?.record(this, token);
-      return this.#instances.get(token) as T;
+    if (this.#providers.hasInstance(token)) {
+      this.#tracker?.record(this, token);
+      return this.#providers.instance(token);
     }
 
     // Ancestors own their own admission; a closing child may still read singletons.
-    if (!this.#factories?.has(token) && this.#parent) {
+    if (!this.#providers.hasFactory(token) && this.#parent) {
       return this.#parent.resolve(token);
     }
     this.#assertOpen();
 
     return this.#acquire(token, () => {
-      const factory = this.#factories?.get(token);
+      const factory = this.#providers.factory(token);
       if (factory) {
-        return factory(this) as T;
+        return factory(this);
       }
       if (typeof token === "function") {
         return new token();
@@ -111,9 +104,9 @@ export class Container {
     dispose?: (value: T) => unknown | Promise<unknown>,
   ): T {
     this.#assertNotDisposed();
-    if (this.#instances?.has(token)) {
-      this.#resolutionTracker?.record(this, token);
-      return this.#instances.get(token) as T;
+    if (this.#providers.hasInstance(token)) {
+      this.#tracker?.record(this, token);
+      return this.#providers.instance(token);
     }
 
     this.#assertOpen();
@@ -122,7 +115,7 @@ export class Container {
 
   /** Register LIFO cleanup, including cleanup acquired during teardown itself. */
   defer(cleanup: () => unknown | Promise<unknown>): void {
-    this.#resourceLifecycle.defer(cleanup);
+    this.#owner.defer(cleanup);
   }
 
   /**
@@ -132,7 +125,7 @@ export class Container {
    * untouched container is safe.
    */
   disposeSync(): boolean {
-    if (this.#resources || this.#instances) {
+    if (this.#resources || this.#providers.hasInstances) {
       return false;
     }
     if (!this.#disposed) {
@@ -150,7 +143,7 @@ export class Container {
       return this.#disposePromise;
     }
 
-    this.#disposePromise = this.#resourceLifecycle.close().finally(() => {
+    this.#disposePromise = this.#owner.close().finally(() => {
       this.#clearResolution();
     });
 
@@ -173,9 +166,8 @@ export class Container {
 
   #clearResolution(): void {
     this.#disposed = true;
-    this.#instances = undefined;
-    this.#factories = undefined;
-    this.#resolving = undefined;
+    this.#providers.clear();
+    this.#cycle.clear();
 
     if (this === this.#root) {
       this.#graph = undefined;
@@ -189,28 +181,20 @@ export class Container {
     factory: Factory<T>,
     dispose?: (value: T) => unknown | Promise<unknown>,
   ): T {
-    const graph = this.#resolutionTracker;
-    const id = graph?.record(this, token);
-    const resolving = (this.#resolving ??= new Set());
-    if (resolving.has(token)) {
-      throw new ResolutionError("circular-dependency", token);
-    }
-
-    resolving.add(token);
-    if (id !== undefined) {
-      graph!.stack.push(id);
-    }
+    const graph = this.#tracker;
+    // A cycle is still an attempt worth reporting, so record before guarding.
+    graph?.record(this, token);
+    this.#cycle.enter(token);
+    graph?.enter(this, token);
 
     try {
-      const value = this.#resourceLifecycle.construct(factory, dispose);
-      (this.#instances ??= new Map()).set(token, value);
+      const value = this.#owner.construct(factory, dispose);
+      this.#providers.cache(token, value);
 
       return value;
     } finally {
-      resolving.delete(token);
-      if (id !== undefined) {
-        graph!.stack.pop();
-      }
+      this.#cycle.exit(token);
+      graph?.exit();
     }
   }
 }
