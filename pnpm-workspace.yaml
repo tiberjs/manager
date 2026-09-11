@@ -1,10 +1,4 @@
 packages:
   - "packages/*"
 minimumReleaseAgeExclude:
-  - "@tiberjs/runner@0.1.1"
-# Temporary pre-release pin. @tiberjs/runner 0.2.0 is unpublished, so packages
-# declaring ^0.2.0 resolve to a locally packed artifact. Remove this entry and
-# regenerate the lockfile once 0.2.0 is published. Packages on ^0.1.1 are
-# unaffected.
-overrides:
-  "@tiberjs/runner@^0.2.0": "file:./vendor/tiberjs-runner-0.2.0.tgz"
+  - '@tiberjs/runner@0.1.1 || 0.2.0'

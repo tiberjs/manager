@@ -105,9 +105,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@tiberjs/runner@^0.2.0': file:./vendor/tiberjs-runner-0.2.0.tgz
-
 importers:
 
   .:
@@ -137,8 +134,8 @@ importers:
   packages/di:
     dependencies:
       '@tiberjs/runner':
-        specifier: file:../../vendor/tiberjs-runner-0.2.0.tgz
-        version: file:vendor/tiberjs-runner-0.2.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
 
   packages/durable:
     dependencies:
@@ -149,8 +146,8 @@ importers:
   packages/eventbus:
     dependencies:
       '@tiberjs/runner':
-        specifier: file:../../vendor/tiberjs-runner-0.2.0.tgz
-        version: file:vendor/tiberjs-runner-0.2.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
 
 packages:
 
@@ -631,9 +628,8 @@ packages:
     resolution: {integrity: sha512-vPAggaLcKMi15Hwly8GadyPEBlhfUV8NKBeFwaIPMApBvzZ+T3vh6CUMcLL0G7a/xGrWlre9NWQzPpm75czMNA==}
     engines: {node: '>=20'}
 
-  '@tiberjs/runner@file:vendor/tiberjs-runner-0.2.0.tgz':
-    resolution: {integrity: sha512-+2byYYOOFHP26VdNNmU167aVlZbkfq6e44NOj/hTvS7ohWYWKr10Jat+8AeT5QtukCT9khFwWTLUBPdbrpSLrA==, tarball: file:vendor/tiberjs-runner-0.2.0.tgz}
-    version: 0.2.0
+  '@tiberjs/runner@0.2.0':
+    resolution: {integrity: sha512-OTYcW1QPzlCNZ2QjurTB8Snw7VHC59vnaY7+uPhUJFrzyL3/H7snEQHLuGg/0BBnrweiJ+S1D7aW1djK1tueFw==}
     engines: {node: '>=24'}
 
   '@tybys/wasm-util@0.10.3':
@@ -1228,7 +1224,7 @@ snapshots:
 
   '@tiberjs/runner@0.1.1': {}
 
-  '@tiberjs/runner@file:vendor/tiberjs-runner-0.2.0.tgz': {}
+  '@tiberjs/runner@0.2.0': {}
 
   '@tybys/wasm-util@0.10.3':
     dependencies:
