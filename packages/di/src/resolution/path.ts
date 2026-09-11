@@ -8,24 +8,16 @@ export interface ResolutionFrame {
 }
 
 /**
- * The chain of constructions in flight under one container tree.
+ * The chain of constructions in flight under one container tree, newest last.
  *
- * Construction is synchronous, so nested resolution is a stack, and the open
- * frame is the dependant of whatever resolves next.
- *
- * A frame is identified by container and token together. An ancestor without a
- * local provider builds its own instance of a class token, so the same token
- * may legitimately be in flight in two containers while a child decorates an
- * ancestor's implementation; only a container re-entering a token it is
- * already constructing is a cycle.
- *
- * Owned by the root container rather than by its diagnostics, so cycles are
- * still reported once the resolution graph is gone.
+ * A frame is a container and a token together, so the same token may be in
+ * flight in two containers while a child decorates an ancestor's
+ * implementation; only a container re-entering its own token is a cycle.
  */
 export class ResolutionPath {
   readonly #frames: ResolutionFrame[] = [];
 
-  /** The construction a resolution observed now belongs to, if any. */
+  /** The construction that whatever resolves next belongs to. */
   get current(): ResolutionFrame | undefined {
     return this.#frames[this.#frames.length - 1];
   }

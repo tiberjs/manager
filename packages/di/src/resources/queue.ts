@@ -6,13 +6,8 @@ import type { Cleanup } from "./cleanup.js";
 export type CleanupInvoker = (cleanup: Cleanup) => unknown;
 
 /**
- * LIFO cleanup storage.
- *
- * Knows nothing about containers or ambient state: every callback runs through
- * the invoker its owner supplied. It owns exactly one rule — cleanup may still
- * be registered while the drain runs, but not after it finished, because
- * nothing would run it — and it answers no question about that rule; its owner
- * joins concurrent callers, so the drain is entered once.
+ * LIFO cleanup storage for one owner, drained once. Knows nothing about
+ * containers: every callback runs through the invoker its owner supplied.
  */
 export class DisposalQueue {
   #cleanups: Cleanup[] | undefined;
@@ -20,7 +15,7 @@ export class DisposalQueue {
 
   constructor(private readonly invoke: CleanupInvoker) {}
 
-  /** Cleanup registered while draining is drained too, still LIFO. */
+  /** Cleanup registered while draining is drained too; after that nothing would run it. */
   defer(cleanup: Cleanup): void {
     if (this.#drained) {
       throw new ContainerClosedError("disposed");

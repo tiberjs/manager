@@ -9,10 +9,9 @@ const noop = (): void => {};
 
 /**
  * Instance-local synchronous notifications, delivered in registration order.
- * Subscribers present when an emission starts receive it; subscription changes
- * affect the next one. Listener errors are reported without changing the
- * publisher's result, and delivery keeps the publisher's execution context
- * because it never leaves the emitting call chain.
+ *
+ * An emission reaches the subscribers present when it started, so a listener
+ * that subscribes, unsubscribes, or closes affects only later emissions.
  */
 export class EventBus implements Disposable {
   readonly #subscriptions = new SubscriptionIndex();
@@ -60,8 +59,7 @@ export class EventBus implements Disposable {
       throw new LifecycleStateError("EventBus", "emit", "closed");
     }
 
-    // Every listener runs, even after one fails, and failures are reported only
-    // once the walk finished so a reporter sees the whole emission.
+    // Every listener runs, even after one fails; the reporter sees the emission once.
     const subscribers = this.#subscriptions.subscribers(key.id);
     let failures: unknown[] | undefined;
     for (let index = 0; index < subscribers.length; index++) {

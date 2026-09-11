@@ -7,12 +7,7 @@ class Rejection {
 // closed ancestor's resources.
 const registriesByRoot = new WeakMap<object, OwnershipRegistry>();
 
-/**
- * At most one disposal owner per object, shared across one container tree.
- *
- * Liveness is the registry's own state: an owner reports that its cleanup
- * drained, and the registry never asks an owner about itself.
- */
+/** At most one disposal owner per object, shared across one container tree. */
 export class OwnershipRegistry {
   readonly #entries = new WeakMap<object, object>();
   readonly #drained = new WeakSet<object>();
@@ -28,11 +23,9 @@ export class OwnershipRegistry {
   }
 
   /**
-   * Whether someone is still responsible for releasing `value`. An owner that
-   * already drained leaves the value adoptable again.
-   *
-   * Rethrows the cached rejection of a refused shape, so every later alias of
-   * that object fails identically.
+   * Whether someone is still responsible for releasing `value`; an owner that
+   * already drained leaves it adoptable again. Rethrows a refused shape's
+   * cached rejection so every later alias of that object fails identically.
    */
   hasLiveOwner(value: object): boolean {
     const entry = this.#entries.get(value);

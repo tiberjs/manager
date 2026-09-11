@@ -8,10 +8,9 @@ export interface ResolutionGraph {
 }
 
 /**
- * Root-local diagnostics, with node identity tied to the owning container.
- *
- * Both directions of every edge are indexed so removing a disposed container
- * costs its own nodes, not a scan of the whole graph.
+ * Root-local resolution diagnostics. Node identity is per container, and both
+ * edge directions are indexed so removing a disposed container costs its own
+ * nodes rather than a full scan.
  */
 export class ResolutionTracker {
   #nextId = 0;
@@ -20,11 +19,7 @@ export class ResolutionTracker {
   readonly #outgoing = new Map<number, Set<number>>();
   readonly #incoming = new Map<number, Set<number>>();
 
-  /**
-   * Records a resolution as a dependency of the construction that requested
-   * it. The open frame comes from the tree's resolution path; this index keeps
-   * no stack of its own.
-   */
+  /** Records a resolution as a dependency of the construction that requested it. */
   record(owner: object, token: InjectionToken<unknown>, parent?: ResolutionFrame): void {
     let ids = this.#idsByOwner.get(owner);
     if (!ids) {

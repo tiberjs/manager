@@ -6,30 +6,20 @@ import { ResourceOwner } from "./resources/owner.js";
 import { OwnershipRegistry } from "./resources/ownership.js";
 import type { Factory, InjectionToken } from "./tokens.js";
 
-/**
- * How far this container has travelled through its own teardown. `closing`
- * lasts from the first asynchronous disposal until that drain settles;
- * synchronous disposal of an untouched container skips straight to `disposed`.
- */
 type ContainerPhase = "open" | "closing" | "disposed";
 
 /**
- * A hierarchical dependency container and resource owner.
- *
- * Child containers resolve ancestor providers while retaining ownership of
- * their own resources. Initialization ordering belongs to the caller; a
- * container only constructs, caches, and disposes.
+ * A hierarchical dependency container and resource owner. A child resolves its
+ * ancestors' providers but owns and disposes only what it constructed itself.
  */
 export class Container {
   readonly #parent: Container | undefined;
   readonly #root: Container;
   readonly #providers = new ProviderRegistry();
-  /** Shared with the whole tree: one construction chain, cycles and all. */
   readonly #path: ResolutionPath;
   /** Diagnostics live on the root; a child records into its root's tracker. */
   #graph: ResolutionTracker | undefined;
   #resources: ResourceOwner | undefined;
-  /** The single asynchronous teardown every later caller joins. */
   #disposal: Promise<void> | undefined;
   #phase: ContainerPhase = "open";
 
@@ -41,8 +31,7 @@ export class Container {
 
   get #owner(): ResourceOwner {
     if (!this.#resources) {
-      // Teardown still registers cleanup, but a drained container never again
-      // builds an owner whose queue nothing would drain.
+      // A drained container must not build an owner whose queue nothing drains.
       this.#admitRetainedAccess();
       this.#resources = new ResourceOwner(this, OwnershipRegistry.forRoot(this.#root));
     }
@@ -131,21 +120,17 @@ export class Container {
   }
 
   /**
-   * Register LIFO cleanup, including cleanup acquired during teardown itself.
-   *
-   * Deliberately blind to the container phase: a resource released mid-drain
-   * may still register its own cleanup, and only the queue knows whether it
-   * has anything left to run.
+   * Register LIFO cleanup. Blind to the phase on purpose: a resource released
+   * mid-drain may still register its own cleanup, and only the queue knows
+   * whether anything is left to run it.
    */
   defer(cleanup: () => unknown | Promise<unknown>): void {
     this.#owner.defer(cleanup);
   }
 
   /**
-   * Close an untouched container without allocating an asynchronous disposal
-   * barrier. Returns false without mutation if resources or instances exist;
-   * await asynchronous disposal instead. Repeated synchronous disposal of an
-   * untouched container is safe.
+   * Close a container that never constructed or deferred anything, avoiding an
+   * `await`. Returns `false` and changes nothing otherwise.
    */
   disposeSync(): boolean {
     if (this.#resources || this.#providers.hasInstances) {
@@ -166,11 +151,10 @@ export class Container {
       });
     }
 
-    // Already disposed without a drain: the outcome is a settled join point too.
     return (this.#disposal ??= Promise.resolve());
   }
 
-  /** What this container already holds stays readable until the drain settles. */
+  /** Reading what this container already holds stays legal until it is disposed. */
   #admitRetainedAccess(): void {
     if (this.#phase === "disposed") {
       throw new ContainerClosedError("disposed");

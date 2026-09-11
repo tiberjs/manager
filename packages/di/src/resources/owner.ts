@@ -9,9 +9,6 @@ import { DisposalQueue } from "./queue.js";
  * The resources one container owns: it binds the ambient container around
  * construction and teardown, claims each constructed value at most once, and
  * releases what it claimed in LIFO order.
- *
- * It resolves nothing and publishes no state. Its container owns the lifecycle
- * phase, and each operation enforces only the invariant it can decide itself.
  */
 export class ResourceOwner {
   readonly #queue: DisposalQueue;
@@ -23,7 +20,7 @@ export class ResourceOwner {
     this.#queue = new DisposalQueue((cleanup) => activeContainer.run(container, cleanup));
   }
 
-  /** Admission belongs to the queue: only it knows whether it already drained. */
+  /** Only the queue knows whether it already drained, so admission is its call. */
   defer(cleanup: Cleanup): void {
     this.#queue.defer(cleanup);
   }
