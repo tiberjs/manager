@@ -2,7 +2,7 @@
 
 A hierarchical dependency container. It builds objects on demand, caches each one, and disposes what it built when the container closes.
 
-No decorators, no `reflect-metadata`, no startup phase. Requires **Node.js 24+**.
+Requires **Node.js 24+**.
 
 ```sh
 pnpm add @tiberjs/di @tiberjs/runner
