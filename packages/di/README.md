@@ -107,17 +107,28 @@ Each reads the ambient container, so classes stay free of container plumbing. Th
 
 ### Scope host
 
-A framework that runs many short executions gives each one a scope without paying for it up front: its Runner attachment declares `[scopeRoot]`, and the scope — `root.child()` — is created on the attachment by the first `currentContainer()`, `scoped()`, or `onDispose()`. An execution that only calls `inject()` never creates one. Whoever owns the attachment disposes `[executionScope]` when the execution ends.
+Two ways to give an execution its own scope:
+
+- **You create it.** `execute({ values: [provide(ContainerKey, root.child())] }, …)` binds a child for that execution; you dispose it afterwards. Simple, and it pays for the child whether or not the execution uses it.
+- **The execution hosts it.** Its Runner attachment declares `[scopeRoot]`; the scope — `root.child()` — is created on the attachment by the first `currentContainer()`, `scoped()`, or `onDispose()`. An execution that only calls `inject()` never creates one. This is for frameworks that run many short executions, most of which never touch a scope.
 
 ```ts
-import { executionScope, scopeRoot, type ScopeHost } from "@tiberjs/di";
+import { Container, executionScope, scopeRoot, type ScopeHost } from "@tiberjs/di";
+import { execute } from "@tiberjs/runner";
 
 class RequestContext implements ScopeHost {
-  readonly [scopeRoot] = app.container;
+  readonly [scopeRoot]: Container;
   [executionScope]: Container | undefined = undefined;
+  constructor(root: Container) {
+    this[scopeRoot] = root;
+  }
 }
 
-// later, when the request ends:
+const context = new RequestContext(root);
+await execute({ attachment: context }, async () => {
+  // ... a handler that may call scoped() / onDispose() ...
+});
+// The host's owner releases the scope, if one was created.
 await context[executionScope]?.[Symbol.asyncDispose]();
 ```
 

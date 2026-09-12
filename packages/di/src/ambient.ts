@@ -26,6 +26,7 @@ export interface ScopeHost {
   [executionScope]?: Container;
 }
 
+/** A host is recognized by the declared slot, not by whether a scope exists yet. */
 function hostOf(state: RuntimeState): ScopeHost | undefined {
   const attachment = state.context.attachment;
   return typeof attachment === "object" && attachment !== null && scopeRoot in attachment
@@ -40,11 +41,14 @@ function noContainer(): never {
 }
 
 /**
- * The container ambient to this call: the construction container, an explicit
- * binding, or the host's scope. Asking for the container creates the host's
- * scope, because the caller may register into it.
+ * The container ambient to this call, in precedence order: the one currently
+ * constructing, an explicit `ContainerKey` binding, then the scope host.
+ *
+ * On a host, `create` decides what a missing scope means: a caller that may
+ * register into the container needs the scope to exist; a caller that only
+ * resolves does not, because a scope resolves through its root anyway.
  */
-export function currentContainer(): Container {
+function ambientContainer(create: boolean): Container {
   const constructing = activeContainer.getStore();
   if (constructing) {
     return constructing;
@@ -61,29 +65,20 @@ export function currentContainer(): Container {
   if (!host) {
     noContainer();
   }
-  return (host[executionScope] ??= host[scopeRoot].child());
+  if (create) {
+    return (host[executionScope] ??= host[scopeRoot].child());
+  }
+  return host[executionScope] ?? host[scopeRoot];
 }
 
-/** Resolve a dependency during construction or inside a bound execution. */
+/** The ambient container, created on a host if it does not exist yet. */
+export function currentContainer(): Container {
+  return ambientContainer(true);
+}
+
+/** Resolve a dependency in the ambient container without creating a host's scope. */
 export function inject<T>(token: InjectionToken<T>): T {
-  const constructing = activeContainer.getStore();
-  if (constructing) {
-    return constructing.resolve(token);
-  }
-  const state = peekState();
-  if (!state) {
-    noContainer();
-  }
-  const bound = state.context.values.get(ContainerKey.id) as Container | undefined;
-  if (bound) {
-    return bound.resolve(token);
-  }
-  // Resolution alone does not need a scope: a scope resolves through its root anyway.
-  const host = hostOf(state);
-  if (!host) {
-    noContainer();
-  }
-  return (host[executionScope] ?? host[scopeRoot]).resolve(token);
+  return ambientContainer(false).resolve(token);
 }
 
 /** Acquire a resource once per container and release it when that container closes. */
