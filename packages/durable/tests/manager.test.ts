@@ -1,12 +1,13 @@
-import { fork, forkGroup, inject, onDispose, signal, token } from "@tiberjs/runner";
+import { Container, inject, onDispose, token } from "@tiberjs/di";
+import { fork, signal } from "@tiberjs/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  DurableExecution,
   DuplicateJobError,
+  CheckpointContext,
+  DurableJob,
   ExecutionCancelledError,
-  ExecutionIdentityConflictError,
   ExecutionFailedError,
-  Job,
+  ExecutionIdentityConflictError,
   Manager,
   MemoryStore,
   createManager,
@@ -15,9 +16,9 @@ import {
 import type {
   ClaimedExecution,
   ClaimExecutionOptions,
+  DurableJobConstructor,
+  DurableJobOptions,
   ExecutionMutation,
-  JobConstructor,
-  JobOptions,
   ManagerOptions,
 } from "../src/index.js";
 
@@ -33,8 +34,11 @@ function create(store = new MemoryStore(), options: Partial<ManagerOptions> = {}
   managers.push(manager);
   return manager;
 }
-function define<Value extends JobConstructor>(options: string | JobOptions, type: Value): Value {
-  Job(options)(type, {} as ClassDecoratorContext<Value>);
+function define<Value extends DurableJobConstructor>(
+  options: string | DurableJobOptions,
+  type: Value,
+): Value {
+  DurableJob(options)(type, {} as ClassDecoratorContext<Value>);
   return type;
 }
 function untilAborted(): Promise<never> {
@@ -227,13 +231,15 @@ describe("durable Runner jobs", () => {
       "research",
       class {
         async run(query: string): Promise<string> {
-          const results = await forkGroup(
-            ...["web", "papers"].map((source) => async () => {
-              count += 1;
-              if (count === 2) started.resolve();
-              await release.promise;
-              return `${source}:${query}`;
-            }),
+          const results = await Promise.all(
+            ["web", "papers"].map((source) =>
+              fork(async () => {
+                count += 1;
+                if (count === 2) started.resolve();
+                await release.promise;
+                return `${source}:${query}`;
+              }),
+            ),
           );
           return results.join("|");
         }
@@ -248,7 +254,7 @@ describe("durable Runner jobs", () => {
     await expect(wrapped.get(execution.id)).resolves.toBe("web:durable|papers:durable");
   });
 
-  it("retries the entire ordinary handler with a fresh DI scope", async () => {
+  it("retries the entire ordinary handler with a fresh DI container", async () => {
     let constructions = 0;
     let effects = 0;
     let disposals = 0;
@@ -270,6 +276,79 @@ describe("durable Runner jobs", () => {
     );
     await expect(create().wrap(Retry).run(21)).resolves.toBe(42);
     expect([constructions, effects, disposals]).toEqual([2, 2, 2]);
+  });
+
+  it("borrows application-container services while recreating attempt-local state", async () => {
+    const application = new Container();
+    const Shared = token<object>("shared");
+    let constructions = 0;
+    let disposals = 0;
+    let handlerConstructions = 0;
+    let attempts = 0;
+    const identities: object[] = [];
+    application.provide(Shared, () => {
+      constructions += 1;
+      onDispose(() => {
+        disposals += 1;
+      });
+      return {};
+    });
+    const Retried = define(
+      { name: "server-container", retry: { retries: 1 } },
+      class {
+        private readonly shared = inject(Shared);
+
+        constructor() {
+          handlerConstructions += 1;
+        }
+
+        run(): number {
+          identities.push(this.shared);
+          attempts += 1;
+          if (attempts === 1) throw new Error("retry");
+          return 42;
+        }
+      },
+    );
+    try {
+      const durable = create(undefined, { parentContainer: application });
+      await expect(durable.wrap(Retried).run(undefined)).resolves.toBe(42);
+      await durable.close();
+      expect({ constructions, disposals, handlerConstructions }).toEqual({
+        constructions: 1,
+        disposals: 0,
+        handlerConstructions: 2,
+      });
+      expect(identities[0]).toBe(identities[1]);
+    } finally {
+      await application[Symbol.asyncDispose]();
+    }
+    expect(disposals).toBe(1);
+  });
+
+  it("persists a genuine Runner child failure as an attempt failure", async () => {
+    let runs = 0;
+    const store = new MemoryStore();
+    const Retried = define(
+      { name: "runner-child-retry", retry: { retries: 1 } },
+      class {
+        run(): number {
+          runs += 1;
+          if (runs === 1) {
+            fork(() => {
+              throw new Error("child failed");
+            });
+            return -1;
+          }
+          return 42;
+        }
+      },
+    );
+    const execution = create(store).wrap(Retried).run(undefined);
+    await expect(execution).resolves.toBe(42);
+    await expect(store.load(execution.id)).resolves.toMatchObject({
+      projection: { status: "completed", attempt: 2, failures: 1, result: 42 },
+    });
   });
 
   it("exhausts retries without executing code after the failure", async () => {
@@ -305,7 +384,7 @@ describe("durable Runner jobs", () => {
     const Agent = define(
       "agent",
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(input: number): Promise<number> {
           runs += 1;
           const plan = await this.durable.checkpoint("plan", input, () => {
@@ -330,8 +409,7 @@ describe("durable Runner jobs", () => {
     await blocked.promise;
     await first.close();
     await expect(store.load(original.id)).resolves.toMatchObject({
-      status: "pending",
-      failures: 0,
+      projection: { status: "pending", failures: 0 },
       checkpoints: {
         plan: { status: "completed" },
         "tool:double": { status: "completed", result: 42 },
@@ -438,10 +516,12 @@ describe("durable Runner jobs", () => {
     await execution.cancel();
     await manager.close();
     await expect(rejection).resolves.toBeInstanceOf(ExecutionCancelledError);
-    await expect(store.load(execution.id)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(store.load(execution.id)).resolves.toMatchObject({
+      projection: { status: "cancelled" },
+    });
   });
 
-  it("provides Runner DI and metadata and commits only after cleanup", async () => {
+  it("provides attempt DI and metadata and commits only after cleanup", async () => {
     const Value = token<number>("value");
     let childCompleted = false;
     let disposed = false;
@@ -625,8 +705,8 @@ describe("durable Runner jobs", () => {
     await closing;
     expect(runs).toBe(0);
     await expect(store.load(execution.id)).resolves.toMatchObject({
-      status: "pending",
-      activationId: undefined,
+      projection: { status: "pending" },
+      activation: undefined,
     });
   });
 });

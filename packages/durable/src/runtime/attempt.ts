@@ -1,20 +1,22 @@
+import { Container, ContainerKey } from "@tiberjs/di";
+import type { Factory, InjectionToken } from "@tiberjs/di";
 import {
-  Scope,
   combinedError,
   currentAttachment,
   currentState,
   execute,
+  provide,
   runWith,
   signal,
 } from "@tiberjs/runner";
-import type { Factory, InjectionToken, RuntimeState } from "@tiberjs/runner";
-import type { ExecutionInfo, JobConstructor } from "../types.js";
+import type { RuntimeState } from "@tiberjs/runner";
+import type { DurableJobConstructor, ExecutionInfo } from "../types.js";
 import type { ExecutionStore } from "../persistence/store.js";
-import { CheckpointRuntime, DurableExecution } from "./checkpoint.js";
+import { CheckpointRuntime, CheckpointContext } from "./checkpoint.js";
 
-const EXECUTION_ATTACHMENT = Symbol("tiberjs.manager.execution");
+const EXECUTION_ATTACHMENT = Symbol("tiberjs.durable.execution");
 
-interface ManagerAttachment {
+interface AttemptAttachment {
   readonly [EXECUTION_ATTACHMENT]: true;
   readonly executionId: string;
   readonly job: string;
@@ -26,30 +28,31 @@ export interface AttemptProvider<T = unknown> {
   readonly factory: Factory<T>;
 }
 
-export interface JobAttempt {
+export interface AttemptOptions {
   readonly executionId: string;
   readonly job: string;
   readonly activationId: string;
   readonly attempt: number;
-  readonly handler: JobConstructor;
+  readonly handler: DurableJobConstructor;
   readonly store: ExecutionStore;
   readonly input: unknown;
   readonly signal: AbortSignal;
+  readonly parentContainer?: Container;
   readonly providers: readonly AttemptProvider[];
 }
 
-/** Wrap one logical job attempt in an independently owned Runner scope. */
-export async function executeJobAttempt(options: JobAttempt): Promise<unknown> {
-  const scope = new Scope(undefined, { startup: true });
+/** Wrap one logical job attempt in independently owned Runner and DI boundaries. */
+export async function executeJobAttempt(options: AttemptOptions): Promise<unknown> {
+  const container = options.parentContainer?.child() ?? new Container();
   for (const provider of options.providers) {
-    scope.provide(provider.token, provider.factory);
+    container.provide(provider.token, provider.factory);
   }
-  scope.provide(
-    DurableExecution,
+  container.provide(
+    CheckpointContext,
     () => new CheckpointRuntime(options.store, options.executionId, options.activationId),
   );
 
-  const attachment: ManagerAttachment = {
+  const attachment: AttemptAttachment = {
     [EXECUTION_ATTACHMENT]: true,
     executionId: options.executionId,
     job: options.job,
@@ -60,25 +63,27 @@ export async function executeJobAttempt(options: JobAttempt): Promise<unknown> {
   let errors: unknown[] | undefined;
   let state: RuntimeState | undefined;
   try {
-    result = await execute({ signal: options.signal, attachment, scope }, async () => {
-      state = currentState();
-      const handler = scope.use(options.handler, () => new options.handler());
-      if (scope.startupPending) {
-        await scope.start();
-      } else {
-        scope.sealStartup();
-      }
-      return handler.run(options.input as never);
-    });
+    result = await execute(
+      {
+        signal: options.signal,
+        attachment,
+        values: [provide(ContainerKey, container)],
+      },
+      async () => {
+        state = currentState();
+        const handler = container.use(options.handler, () => new options.handler());
+        return handler.run(options.input as never);
+      },
+    );
   } catch (error) {
     (errors ??= []).push(error);
   }
 
   try {
     if (state) {
-      await runWith(state, () => scope[Symbol.asyncDispose]());
+      await runWith(state, () => container[Symbol.asyncDispose]());
     } else {
-      await scope[Symbol.asyncDispose]();
+      await container[Symbol.asyncDispose]();
     }
   } catch (error) {
     (errors ??= []).push(error);
@@ -91,7 +96,7 @@ export async function executeJobAttempt(options: JobAttempt): Promise<unknown> {
 }
 
 export function currentExecution(): ExecutionInfo {
-  const attachment = currentAttachment<ManagerAttachment | undefined>();
+  const attachment = currentAttachment<AttemptAttachment | undefined>();
   if (!attachment?.[EXECUTION_ATTACHMENT]) {
     throw new Error("The current Runner execution is not a durable job.");
   }

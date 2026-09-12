@@ -27,8 +27,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
-      # @tiberjs/durable still targets the 0.1.x runner API and is excluded until it is
-      # migrated (AGENTS.md, "@tiberjs/durable"). Drop the filters with that migration.
-      - run: pnpm -r --filter '!@tiberjs/durable' build
-      - run: pnpm exec vitest run --project @tiberjs/di --project @tiberjs/eventbus
-      - run: pnpm -r --filter '!@tiberjs/durable' pack --pack-destination .artifacts
+      - run: pnpm build
+      - run: pnpm test
+      - run: pnpm -r pack --pack-destination .artifacts

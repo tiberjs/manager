@@ -12,7 +12,7 @@ All three require **Node.js 24+** and TypeScript compiled with standard decorato
 
 ## Runner dependency
 
-`@tiberjs/di` and `@tiberjs/eventbus` depend on `@tiberjs/runner` `^0.2.0`; `@tiberjs/durable` stays on `^0.1.1`. Runner 0.2.0 is not published yet, so inside this workspace `^0.2.0` resolves to the packed artifact committed under `vendor/`. That pin is temporary and disappears once 0.2.0 ships; packages on `^0.1.1` are unaffected by it.
+All three packages target the published `@tiberjs/runner` 0.3 line. `@tiberjs/durable` additionally uses `@tiberjs/di` for its attempt-local dependency container; every dependency goes through published package exports.
 
 ## Development
 

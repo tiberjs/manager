@@ -1,4 +1,4 @@
-import type { Factory, InjectionToken } from "@tiberjs/runner";
+import type { Container, Factory, InjectionToken } from "@tiberjs/di";
 import type { AttemptProvider } from "./runtime/attempt.js";
 import {
   ExecutionCancelledError,
@@ -14,19 +14,22 @@ import { normalizePolicy } from "./execution/retry.js";
 import type { ExecutionStore } from "./persistence/store.js";
 import { terminal } from "./persistence/store.js";
 import type {
+  DurableJobConstructor,
+  DurableJobInputOf,
+  DurableJobOutputOf,
   Execution,
   ExecutionOptions,
   ExecutionRecord,
   RetryPolicy,
-  JobConstructor,
-  JobInputOf,
-  JobOutputOf,
-  WrappedJob,
+  StoredExecutionEvent,
+  WrappedDurableJob,
 } from "./types.js";
 import { DurableWorker } from "./runtime/worker.js";
-import { JobRegistry } from "./job/registry.js";
+import { DurableJobRegistry } from "./job/registry.js";
 
 export interface ManagerOptions {
+  /** Optional application container inherited by every attempt; the Manager never disposes it. */
+  readonly parentContainer?: Container;
   readonly store: ExecutionStore;
   readonly concurrency?: number;
   readonly leaseDurationMs?: number;
@@ -41,7 +44,7 @@ const MANAGER_CLOSED = new ManagerClosedError();
 export class Manager implements ExecutionHost, AsyncDisposable {
   private readonly store: ExecutionStore;
   private readonly autoStart: boolean;
-  private readonly registry: JobRegistry;
+  private readonly registry: DurableJobRegistry;
   private readonly providers: AttemptProvider[] = [];
   private readonly worker: DurableWorker;
   private readonly submissions = new Set<Promise<unknown>>();
@@ -51,11 +54,12 @@ export class Manager implements ExecutionHost, AsyncDisposable {
   constructor(options: ManagerOptions) {
     this.store = options.store;
     this.autoStart = options.autoStart ?? true;
-    this.registry = new JobRegistry(normalizePolicy(options.retry));
+    this.registry = new DurableJobRegistry(normalizePolicy(options.retry));
     this.worker = new DurableWorker({
       store: options.store,
       registry: this.registry,
       providers: this.providers,
+      parentContainer: options.parentContainer,
       concurrency: options.concurrency ?? 1,
       leaseDurationMs: options.leaseDurationMs ?? 30_000,
       pollIntervalMs: options.pollIntervalMs ?? 100,
@@ -68,7 +72,7 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     return this;
   }
 
-  register(...types: JobConstructor[]): this {
+  register(...types: DurableJobConstructor[]): this {
     this.assertOpen();
     if (this.registry.register(types)) {
       this.worker.wake();
@@ -76,7 +80,9 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     return this;
   }
 
-  wrap<Job extends JobConstructor>(type: Job): WrappedJob<JobInputOf<Job>, JobOutputOf<Job>> {
+  wrap<Definition extends DurableJobConstructor>(
+    type: Definition,
+  ): WrappedDurableJob<DurableJobInputOf<Definition>, DurableJobOutputOf<Definition>> {
     this.register(type);
     return {
       run: (input, options) => this.run(type, input, options),
@@ -84,11 +90,11 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     };
   }
 
-  run<Job extends JobConstructor>(
-    type: Job,
-    input: JobInputOf<Job>,
+  run<Definition extends DurableJobConstructor>(
+    type: Definition,
+    input: DurableJobInputOf<Definition>,
     options: ExecutionOptions = {},
-  ): Execution<JobOutputOf<Job>> {
+  ): Execution<DurableJobOutputOf<Definition>> {
     this.assertOpen();
     const registered = this.registry.get(type);
     const record = createExecutionRecord(registered, input, options, Date.now());
@@ -96,25 +102,28 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     const ready = this.trackSubmission(
       this.store.create(record).then(async ({ execution }) => {
         if (
-          execution.job !== record.job ||
-          execution.inputFingerprint !== record.inputFingerprint
+          execution.submission.job !== record.submission.job ||
+          execution.submission.inputFingerprint !== record.submission.inputFingerprint
         ) {
-          throw new ExecutionIdentityConflictError(execution.id);
+          throw new ExecutionIdentityConflictError(execution.submission.id);
         }
-        if (this.autoStart && !this.closing && !terminal(execution.status)) {
+        if (this.autoStart && !this.closing && !terminal(execution.projection.status)) {
           await this.worker.start();
         }
         this.worker.wake();
       }),
     );
-    return new ManagedExecution(record.id, this, ready);
+    return new ManagedExecution(record.submission.id, this, ready);
   }
 
-  get<Job extends JobConstructor>(type: Job, id: string): Execution<JobOutputOf<Job>> {
+  get<Definition extends DurableJobConstructor>(
+    type: Definition,
+    id: string,
+  ): Execution<DurableJobOutputOf<Definition>> {
     this.assertOpen();
     const registered = this.registry.get(type);
     const ready = this.load(id).then((execution) => {
-      if (execution.job !== registered.name) {
+      if (execution.submission.job !== registered.name) {
         throw new ExecutionIdentityConflictError(id);
       }
     });
@@ -134,26 +143,30 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     return execution;
   }
 
+  async history(id: string): Promise<readonly StoredExecutionEvent[]> {
+    return await this.store.readEvents(id);
+  }
+
   async wait<T>(id: string): Promise<T> {
     while (true) {
       const execution = await this.load(id);
-      switch (execution.status) {
+      switch (execution.projection.status) {
         case "completed":
-          return execution.result as T;
+          return execution.projection.result as T;
         case "failed":
           throw new ExecutionFailedError(
             id,
-            execution.error ?? serializeError("Unknown execution failure"),
+            execution.projection.error ?? serializeError("Unknown execution failure"),
           );
         case "cancelled":
           throw new ExecutionCancelledError(
             id,
-            execution.cancellationReason ?? serializeError("Cancelled"),
+            execution.projection.cancellationReason ?? serializeError("Cancelled"),
           );
         case "pending":
         case "running":
         case "cancelling": {
-          const failure = this.worker.failureFor(id, execution.attempt);
+          const failure = this.worker.failureFor(id, execution.projection.attempt);
           if (failure) {
             throw failure.error;
           }
