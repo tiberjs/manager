@@ -5,12 +5,19 @@ import {
   ContainerClosedError,
   ContainerKey,
   currentContainer,
+  executionScope,
   inject,
   onDispose,
   scoped,
+  scopeRoot,
   token,
   withContainer,
 } from "../src/index.js";
+import type { ScopeHost } from "../src/index.js";
+
+function host(root: Container): ScopeHost {
+  return { [scopeRoot]: root, [executionScope]: undefined };
+}
 
 describe("ambient container", () => {
   test("every ambient API fails without construction, a binding, or withContainer", () => {
@@ -208,5 +215,64 @@ describe("ambient container", () => {
 
     await other[Symbol.asyncDispose]();
     await constructing[Symbol.asyncDispose]();
+  });
+});
+
+describe("scope host", () => {
+  test("inject resolves through the root without creating a scope; scoped creates it once", async () => {
+    const root = new Container();
+    const Config = token<string>("config");
+    const Resource = token<{ n: number }>("resource");
+    root.provide(Config, () => "app");
+    const attachment = host(root);
+    let created = 0;
+
+    await execute({ attachment }, async () => {
+      expect(inject(Config)).toBe("app");
+      expect(attachment[executionScope]).toBeUndefined();
+
+      const first = scoped(Resource, () => ({ n: ++created }));
+      const scope = attachment[executionScope];
+      expect(scope).toBeInstanceOf(Container);
+      expect(currentContainer()).toBe(scope);
+
+      // A forked child inherits the attachment, so it shares the scope.
+      const second = await fork(() => scoped(Resource, () => ({ n: ++created })));
+      expect(second).toBe(first);
+      expect(inject(Config)).toBe("app");
+    });
+
+    expect(created).toBe(1);
+    expect(root.resolutionGraph().nodes.length).toBeGreaterThan(0);
+    await attachment[executionScope]![Symbol.asyncDispose]();
+    expect(() => attachment[executionScope]!.resolve(Config)).toThrow(ContainerClosedError);
+    expect(root.resolve(Config)).toBe("app");
+    await root[Symbol.asyncDispose]();
+  });
+
+  test("an explicit binding takes precedence over the host", async () => {
+    const root = new Container();
+    const other = new Container();
+    const Resource = token<string>("resource");
+    const attachment = host(root);
+
+    await execute({ attachment }, () => {
+      withContainer(other, () => {
+        expect(currentContainer()).toBe(other);
+        expect(scoped(Resource, () => "other")).toBe("other");
+      });
+      expect(attachment[executionScope]).toBeUndefined();
+      expect(other.resolve(Resource)).toBe("other");
+    });
+
+    await other[Symbol.asyncDispose]();
+    await root[Symbol.asyncDispose]();
+  });
+
+  test("an attachment that is not a host provides no container", async () => {
+    await execute({ attachment: { request: true } }, () => {
+      expect(() => currentContainer()).toThrow(/No active container/);
+      expect(() => inject(token<object>("value"))).toThrow(/No active container/);
+    });
   });
 });

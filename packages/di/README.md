@@ -68,7 +68,7 @@ test.provide(Db, () => new Db()); // without this, Db stays the root's
 
 **Register before you resolve.** Replacing a provider whose instance this container already handed out raises `ProviderConflictError`, because the cached instance would keep winning. Override in a child instead.
 
-**`inject()` needs an ambient container.** It works while an object is being constructed or disposed, inside `withContainer()`, and inside a Runner execution bound to `ContainerKey`. A method called later with none of those raises. Capture what you need during construction, or use `container.resolve()` directly.
+**`inject()` needs an ambient container.** It works while an object is being constructed or disposed, inside `withContainer()`, inside a Runner execution bound to `ContainerKey`, and inside an execution whose attachment is a `ScopeHost`. A method called later with none of those raises. Capture what you need during construction, or use `container.resolve()` directly.
 
 ## API
 
@@ -94,16 +94,32 @@ test.provide(Db, () => new Db()); // without this, Db stays the root's
 
 ### Ambient access
 
-Each reads the ambient container, so classes stay free of container plumbing.
+Each reads the ambient container, so classes stay free of container plumbing. The container is found in this order: the one currently constructing, an explicit `ContainerKey` binding, then the execution's scope host.
 
-|                                     |                                                                       |
-| ----------------------------------- | --------------------------------------------------------------------- |
-| `inject(token)`                     | Resolve.                                                              |
-| `scoped(token, factory, dispose?)`  | Acquire an inline resource.                                           |
-| `onDispose(cleanup)`                | Register cleanup.                                                     |
-| `currentContainer()`                | The ambient container; raises when there is none.                     |
-| `withContainer(container, handler)` | Run `handler` with `container` ambient.                               |
-| `ContainerKey`                      | Runner context key, for binding a container to an execution yourself. |
+|                                     |                                                                                           |
+| ----------------------------------- | ----------------------------------------------------------------------------------------- |
+| `inject(token)`                     | Resolve. On a host, resolves through the scope if one exists, otherwise the root.         |
+| `scoped(token, factory, dispose?)`  | Acquire an inline resource in the ambient container, creating the host's scope if needed. |
+| `onDispose(cleanup)`                | Register cleanup in the ambient container, creating the host's scope if needed.           |
+| `currentContainer()`                | The ambient container; creates the host's scope; raises when there is none.               |
+| `withContainer(container, handler)` | Run `handler` with `container` ambient. Overrides a host.                                 |
+| `ContainerKey`                      | Runner context key, for binding a container to an execution yourself.                     |
+
+### Scope host
+
+A framework that runs many short executions gives each one a scope without paying for it up front: its Runner attachment declares `[scopeRoot]`, and the scope — `root.child()` — is created on the attachment by the first `currentContainer()`, `scoped()`, or `onDispose()`. An execution that only calls `inject()` never creates one. Whoever owns the attachment disposes `[executionScope]` when the execution ends.
+
+```ts
+import { executionScope, scopeRoot, type ScopeHost } from "@tiberjs/di";
+
+class RequestContext implements ScopeHost {
+  readonly [scopeRoot] = app.container;
+  [executionScope]: Container | undefined = undefined;
+}
+
+// later, when the request ends:
+await context[executionScope]?.[Symbol.asyncDispose]();
+```
 
 ## Cleanup
 
