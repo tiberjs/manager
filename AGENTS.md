@@ -18,11 +18,17 @@ Each package owns a `README.md` that documents it for consumers; the root `READM
 
 Each package is independent. Consume Runner through published exports, never sibling source or a parent workspace link; check the installed Runner package's exports, not the latest sibling source API. No package depends on server, HTTP, WebSocket, gRPC, brokers, queue, cron, or transport packages. `di` and `eventbus` must not depend on `durable`, and `durable` must not depend on them until it is migrated. Cross-package reuse inside this workspace goes through package exports as well.
 
-## Runner versions and the pre-release pin
+## Runner versions
 
-`@tiberjs/runner` 0.2.0 removed DI, EventBus, ApplicationLifecycle, Scope, and tracing from the runtime; those responsibilities now live in this workspace. `di` and `eventbus` target `^0.2.0` and use only the execution runtime — `Job`, `Supervisor`, `TaskGroup`, context, state, and the error model. `durable` stays on `^0.1.1` and keeps 0.1.1 semantics, including Runner-owned DI, until it is migrated deliberately; do not partially port it.
+`@tiberjs/runner` 0.2.0 removed DI, EventBus, ApplicationLifecycle, Scope, and tracing from the runtime; those responsibilities now live in this workspace. `di` and `eventbus` target the published `^0.3.0` and use only the execution runtime — `Job`, `Supervisor`, `TaskGroup`, context, state, and the error model. `durable` stays on `^0.1.1` and keeps 0.1.1 semantics, including Runner-owned DI, until it is migrated deliberately; do not partially port it. It does not build or test against the current runner, so CI and publishing filter it out until that migration lands.
 
-0.2.0 is unpublished, so `pnpm-workspace.yaml` overrides `@tiberjs/runner@^0.2.0` to a packed artifact committed under `vendor/` (`.gitignore` un-ignores it) so that a fresh clone installs deterministically. This is temporary: the override, its lockfile entry, and the committed artifact are removed in favor of the published version before any release of `di` or `eventbus`. Packages on `^0.1.1` are unaffected by the override.
+There is no packed-artifact override any more; every runner dependency resolves from npm.
+
+## CI and publishing
+
+`ci.yml` runs on pushes to `main` and on pull requests: `pnpm check`, then build, test, and pack for `di` and `eventbus`.
+
+`publish.yml` is dispatched manually with the package directory to publish, runs only from `main`, rebuilds and retests, then runs `npm publish --access public --provenance` in that directory. It authenticates through npm trusted publishing with GitHub OIDC (`id-token: write`) and must not receive `NPM_TOKEN` or `NODE_AUTH_TOKEN`. After a package's bootstrap release, register repository `tiberjs/manager`, workflow `publish.yml`, and GitHub environment `npm` as that package's trusted publisher. Bump the package version in source before dispatching; publishing an existing version must fail. `durable` is added to the dispatch choices when it builds again.
 
 ## `@tiberjs/durable`
 
