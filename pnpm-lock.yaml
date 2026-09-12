@@ -134,8 +134,8 @@ importers:
   packages/di:
     dependencies:
       '@tiberjs/runner':
-        specifier: ^0.2.0
-        version: 0.2.0
+        specifier: ^0.3.0
+        version: 0.3.0
 
   packages/durable:
     dependencies:
@@ -146,8 +146,8 @@ importers:
   packages/eventbus:
     dependencies:
       '@tiberjs/runner':
-        specifier: ^0.2.0
-        version: 0.2.0
+        specifier: ^0.3.0
+        version: 0.3.0
 
 packages:
 
@@ -628,8 +628,8 @@ packages:
     resolution: {integrity: sha512-vPAggaLcKMi15Hwly8GadyPEBlhfUV8NKBeFwaIPMApBvzZ+T3vh6CUMcLL0G7a/xGrWlre9NWQzPpm75czMNA==}
     engines: {node: '>=20'}
 
-  '@tiberjs/runner@0.2.0':
-    resolution: {integrity: sha512-OTYcW1QPzlCNZ2QjurTB8Snw7VHC59vnaY7+uPhUJFrzyL3/H7snEQHLuGg/0BBnrweiJ+S1D7aW1djK1tueFw==}
+  '@tiberjs/runner@0.3.0':
+    resolution: {integrity: sha512-kvC39OI4MLWdB55ewaal0LCK8XeCyidRRuOHekgTgHP9LYb9v6F4hZRP1z/34oBPKGAlMUekhBpRUzDhZS3iPA==}
     engines: {node: '>=24'}
 
   '@tybys/wasm-util@0.10.3':
@@ -1224,7 +1224,7 @@ snapshots:
 
   '@tiberjs/runner@0.1.1': {}
 
-  '@tiberjs/runner@0.2.0': {}
+  '@tiberjs/runner@0.3.0': {}
 
   '@tybys/wasm-util@0.10.3':
     dependencies:
