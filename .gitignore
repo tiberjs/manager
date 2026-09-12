@@ -3,6 +3,8 @@ dist
 coverage
 *.lcov
 *.tgz
-!vendor/*.tgz
 *.tsbuildinfo
 .DS_Store
+
+# CI pack output
+.artifacts/
