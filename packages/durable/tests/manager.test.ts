@@ -1,4 +1,5 @@
-import { fork, forkGroup, inject, onDispose, signal, token } from "@tiberjs/runner";
+import { inject, onDispose, token } from "@tiberjs/di";
+import { fork, signal } from "@tiberjs/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DurableExecution,
@@ -227,13 +228,15 @@ describe("durable Runner jobs", () => {
       "research",
       class {
         async run(query: string): Promise<string> {
-          const results = await forkGroup(
-            ...["web", "papers"].map((source) => async () => {
-              count += 1;
-              if (count === 2) started.resolve();
-              await release.promise;
-              return `${source}:${query}`;
-            }),
+          const results = await Promise.all(
+            ["web", "papers"].map((source) =>
+              fork(async () => {
+                count += 1;
+                if (count === 2) started.resolve();
+                await release.promise;
+                return `${source}:${query}`;
+              }),
+            ),
           );
           return results.join("|");
         }
@@ -248,7 +251,7 @@ describe("durable Runner jobs", () => {
     await expect(wrapped.get(execution.id)).resolves.toBe("web:durable|papers:durable");
   });
 
-  it("retries the entire ordinary handler with a fresh DI scope", async () => {
+  it("retries the entire ordinary handler with a fresh DI container", async () => {
     let constructions = 0;
     let effects = 0;
     let disposals = 0;
@@ -441,7 +444,7 @@ describe("durable Runner jobs", () => {
     await expect(store.load(execution.id)).resolves.toMatchObject({ status: "cancelled" });
   });
 
-  it("provides Runner DI and metadata and commits only after cleanup", async () => {
+  it("provides attempt DI and metadata and commits only after cleanup", async () => {
     const Value = token<number>("value");
     let childCompleted = false;
     let disposed = false;

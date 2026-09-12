@@ -1,4 +1,5 @@
-import { execute, fork, forkGroup, inject, signal } from "@tiberjs/runner";
+import { inject } from "@tiberjs/di";
+import { execute, fork, signal } from "@tiberjs/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import { DurableExecution, Job, Manager, MemoryStore, currentExecution } from "../src/index.js";
 import type { BeginCheckpointResult, CheckpointMutation, JobConstructor } from "../src/index.js";
@@ -154,11 +155,11 @@ describe("durable checkpoints", () => {
             await release.promise;
             return 21;
           };
-          return forkGroup(
-            async () => await this.durable.checkpoint("same", 1, operation),
-            async () => await this.durable.checkpoint("same", 1, operation),
-            async () => await this.durable.checkpoint("other", 1, operation),
-          );
+          return Promise.all([
+            this.durable.checkpoint("same", 1, operation),
+            this.durable.checkpoint("same", 1, operation),
+            this.durable.checkpoint("other", 1, operation),
+          ]);
         }
       },
     ).run(undefined);
@@ -245,30 +246,31 @@ describe("durable checkpoints", () => {
     await expect(execution).rejects.toMatchObject({ error: { message: "unobserved failure" } });
   });
 
-  it("allows an observed failed checkpoint to be retried with identical input", async () => {
+  it("retries a rejected checkpoint in a new attempt even when the handler catches it", async () => {
+    let handlerRuns = 0;
     let calls = 0;
-    await expect(
-      wrap(
-        class {
-          readonly durable = inject(DurableExecution);
-          async run(): Promise<number> {
-            try {
-              await this.durable.checkpoint("try", 21, () => {
-                calls += 1;
-                throw new Error("temporary");
-              });
-            } catch {
-              /* The handler owns this failure and explicitly retries the effect. */
-            }
-            return this.durable.checkpoint("try", 21, () => {
+    const execution = wrap(
+      class {
+        readonly durable = inject(DurableExecution);
+        async run(): Promise<number> {
+          handlerRuns += 1;
+          try {
+            return await this.durable.checkpoint("try", 21, () => {
               calls += 1;
+              if (currentExecution().attempt === 1) {
+                throw new Error("temporary");
+              }
               return 42;
             });
+          } catch {
+            // A genuine child failure has already failed this Runner attempt.
+            return -1;
           }
-        },
-      ).run(undefined),
-    ).resolves.toBe(42);
-    expect(calls).toBe(2);
+        }
+      },
+    ).run(undefined, { retry: { retries: 1 } });
+    await expect(execution).resolves.toBe(42);
+    expect([handlerRuns, calls]).toEqual([2, 2]);
   });
 
   it("prevents recursive checkpoint operations rather than deadlocking on their reservation", async () => {

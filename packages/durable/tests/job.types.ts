@@ -1,4 +1,4 @@
-import { inject } from "@tiberjs/runner";
+import { inject } from "@tiberjs/di";
 import {
   DurableExecution,
   Job,

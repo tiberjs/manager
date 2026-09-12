@@ -6,8 +6,7 @@ This repository is a pnpm workspace of three independently published packages bu
 manager/
 ├── packages/durable/    # @tiberjs/durable  — durable jobs on top of Runner attempts
 ├── packages/di/         # @tiberjs/di       — hierarchical container and resource ownership
-├── packages/eventbus/   # @tiberjs/eventbus — typed synchronous in-process notifications
-└── vendor/              # temporary packed @tiberjs/runner pre-release
+└── packages/eventbus/   # @tiberjs/eventbus — typed synchronous in-process notifications
 ```
 
 - `packages/durable` (`@tiberjs/durable`, formerly `@tiberjs/manager`): logical job identity, persisted input/results, optional dynamic checkpoints, retries, leases, cancellation, and recovery. Runner owns every process-local attempt. There is no graph declaration or DAG scheduler.
@@ -16,19 +15,19 @@ manager/
 
 Each package owns a `README.md` that documents it for consumers; the root `README.md` is only a workspace index. This file is the contributor contract — keep user-facing usage prose in the package READMEs, and update a package's README with any change to its public surface.
 
-Each package is independent. Consume Runner through published exports, never sibling source or a parent workspace link; check the installed Runner package's exports, not the latest sibling source API. No package depends on server, HTTP, WebSocket, gRPC, brokers, queue, cron, or transport packages. `di` and `eventbus` must not depend on `durable`, and `durable` must not depend on them until it is migrated. Cross-package reuse inside this workspace goes through package exports as well.
+Each package is independent. Consume dependencies through package exports, never sibling source or a parent workspace link; check installed package exports, not the latest sibling source API. No package depends on server, HTTP, WebSocket, gRPC, brokers, queue, cron, or transport packages. `di` and `eventbus` must not depend on `durable`; `durable` may depend on `di` for attempt-local containers. Cross-package reuse inside this workspace still goes through package exports.
 
 ## Runner versions
 
-`@tiberjs/runner` 0.2.0 removed DI, EventBus, ApplicationLifecycle, Scope, and tracing from the runtime; those responsibilities now live in this workspace. `di` and `eventbus` target the published `^0.3.0` and use only the execution runtime — `Job`, `Supervisor`, `TaskGroup`, context, state, and the error model. `durable` stays on `^0.1.1` and keeps 0.1.1 semantics, including Runner-owned DI, until it is migrated deliberately; do not partially port it. It does not build or test against the current runner, so CI and publishing filter it out until that migration lands.
+All three packages target the published `@tiberjs/runner` 0.3 line. Runner owns execution; `@tiberjs/di` owns dependency construction and cleanup. `durable` depends on the published DI 0.1 line and binds one fresh container to each attempt.
 
 There is no packed-artifact override any more; every runner dependency resolves from npm.
 
 ## CI and publishing
 
-`ci.yml` runs on pushes to `main` and on pull requests: `pnpm check`, then build, test, and pack for `di` and `eventbus`.
+`ci.yml` runs on pushes to `main` and on pull requests: frozen install, check, build, test, and pack for all three packages.
 
-`publish.yml` is dispatched manually with the package directory to publish, runs only from `main`, rebuilds and retests, then runs `npm publish --access public --provenance` in that directory. It authenticates through npm trusted publishing with GitHub OIDC (`id-token: write`) and must not receive `NPM_TOKEN` or `NODE_AUTH_TOKEN`. After a package's bootstrap release, register repository `tiberjs/manager`, workflow `publish.yml`, and GitHub environment `npm` as that package's trusted publisher. Bump the package version in source before dispatching; publishing an existing version must fail. `durable` is added to the dispatch choices when it builds again.
+`publish.yml` is dispatched manually with the package directory to publish, runs only from `main`, rebuilds and retests the workspace, then runs `npm publish --access public --provenance` in that directory. It authenticates through npm trusted publishing with GitHub OIDC (`id-token: write`) and must not receive `NPM_TOKEN` or `NODE_AUTH_TOKEN`. After a package's bootstrap release, register repository `tiberjs/manager`, workflow `publish.yml`, and GitHub environment `npm` as that package's trusted publisher. Bump the package version in source before dispatching; publishing an existing version must fail.
 
 ## `@tiberjs/durable`
 
@@ -45,8 +44,8 @@ There is no packed-artifact override any more; every runner dependency resolves 
 - `packages/durable/src/runtime/worker.ts`: job claiming, activation concurrency, wakeups, shutdown.
 - `packages/durable/src/runtime/job-activation.ts`: Runner attempt, fenced completion and cancellation acknowledgement.
 - `packages/durable/src/runtime/lease.ts`: heartbeat renewal, interruption, and joined lease-monitor shutdown.
-- `packages/durable/src/runtime/attempt.ts`: fresh Runner scope, handler construction, startup, cleanup, ambient metadata.
-- `packages/durable/src/runtime/checkpoint.ts`: injectable `DurableExecution` and Runner-owned checkpoint operations.
+- `packages/durable/src/runtime/attempt.ts`: fresh Runner Job and DI container, handler construction, cleanup, ambient metadata.
+- `packages/durable/src/runtime/checkpoint.ts`: injectable `DurableExecution` and Runner-owned checkpoint Jobs.
 - `packages/durable/src/persistence/store.ts`: atomic persistence SPI.
 - `packages/durable/src/persistence/adapter/memory-store.ts`: clone-isolated reference adapter.
 - `packages/durable/src/types.ts`: named public job, execution, checkpoint, retry, and persisted-record contracts.
@@ -59,7 +58,8 @@ Do not copy Runner execution, TaskGroup, DI, cancellation, or resource lifecycle
 
 ```text
 durable → logical job identity, leases, retry, durable cancellation, checkpoint records
-Runner  → one attempt's context, TaskGroup, cooperative signal, DI scope, cleanup
+Runner  → one attempt's execution context, child Jobs, and cooperative cancellation
+DI      → one attempt's dependency construction, caching, and cleanup
 ```
 
 A job is a reconstructable class with a `run(input)` method and a stable `@Job` name. `wrap(Type)` binds a class to a manager; it does not serialize code or closures. Input is cloned synchronously at submission. No required base class and no graph compilation.
@@ -68,16 +68,16 @@ On recovery the handler starts at entry. Only successful persisted checkpoints s
 
 Checkpoint keys must identify logical effects independently of execution timing. Include all changing operation arguments in checkpoint input. Same key with different input fails even after an unsuccessful operation. Completed `undefined` is distinct from missing. Object-prototype names are valid keys.
 
-Checkpoint operations are leaves: nested checkpoints are rejected. Orchestrate in the handler using ordinary loops, branches, and Runner forks. Each operation has a nested Runner task boundary, but DI resources remain job-scoped; checkpoint-local resources use explicit disposal. A checkpoint commits after its child tasks join. A job commits only after its own Runner children join and scope cleanup succeeds. Already committed checkpoints survive subsequent job/cleanup failure.
+Checkpoint operations are leaves: nested checkpoints are rejected. Orchestrate in the handler using ordinary loops, branches, and Runner forks. Each operation has a nested Runner boundary, while its resources remain owned by the attempt container; checkpoint-local resources use explicit disposal. A checkpoint commits after its child Jobs join. A job commits only after its own Runner descendants join and container cleanup succeeds. A genuine checkpoint failure fails the attempt even if the handler catches the returned Job; same-attempt recovery belongs inside the operation, while durable retry starts a new attempt. Already committed checkpoints survive subsequent job or cleanup failure.
 
 ### Public contracts
 
 - Use standard TC39 decorators, never legacy `experimentalDecorators` or `reflect-metadata`.
 - `JobInputOf` and `JobOutputOf` infer handler types; parameterless jobs use `undefined` input.
 - `Execution<T>` remains `PromiseLike`, preserving `id`, `status()`, and `cancel()`.
-- `DurableExecution` is a package-owned DI token; user providers must not replace its attempt-local service.
+- `DurableExecution` is a package-owned DI token; user providers must not replace its attempt-local service. Its checkpoint method returns a Runner `Job`.
 - `currentExecution()` exposes execution ID, job name, attempt, and live signal.
-- Scope disposal must retain the attempt's Runner context, with an already-closed TaskGroup.
+- Attempt-container disposal must retain the attempt's Runner context after its child Jobs have closed.
 - Admission failures are retained by handles until observation; constructing a handle must not create an unhandled rejection.
 - Equal job/key/input joins the existing execution; differing input raises an identity conflict.
 - Registration validates the entire batch before mutating indexes or constructing a handler.

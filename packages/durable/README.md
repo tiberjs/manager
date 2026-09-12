@@ -9,7 +9,7 @@ Requires **Node.js 24+** and TypeScript compiled with standard decorators (for e
 ## Installation
 
 ```sh
-pnpm add @tiberjs/durable @tiberjs/runner
+pnpm add @tiberjs/durable @tiberjs/di @tiberjs/runner
 ```
 
 ## Quick start
@@ -17,16 +17,16 @@ pnpm add @tiberjs/durable @tiberjs/runner
 Add `@Job` to a class with a `run(input)` method, then wrap it with a manager:
 
 ```ts
-import { forkGroup } from "@tiberjs/runner";
+import { fork } from "@tiberjs/runner";
 import { Job, MemoryStore, createManager } from "@tiberjs/durable";
 
 @Job({ name: "research:v1", retry: { retries: 3, delayMs: 250 } })
 class Research {
   async run(input: { query: string }): Promise<string> {
-    const results = await forkGroup(
-      () => Promise.resolve(`web:${input.query}`),
-      () => Promise.resolve(`papers:${input.query}`),
-    );
+    const results = await Promise.all([
+      fork(() => Promise.resolve(`web:${input.query}`)),
+      fork(() => Promise.resolve(`papers:${input.query}`)),
+    ]);
     return results.join("\n");
   }
 }
@@ -39,7 +39,7 @@ console.log(execution.id);
 console.log(await execution);
 ```
 
-`wrap()` registers the handler and infers its input and result types. `run()` starts the local worker automatically; `concurrency` limits the number of active jobs. Each attempt creates a fresh handler in a Runner scope, so Runner DI, child tasks, and cleanup work as usual.
+`wrap()` registers the handler and infers its input and result types. `run()` starts the local worker automatically; `concurrency` limits the number of active jobs. Each attempt owns a fresh DI container for its handler and manager-provided dependencies. Runner owns its execution context, cancellation, and descendants; container cleanup completes before the result is committed.
 
 ## Manage executions
 
@@ -72,7 +72,8 @@ Retry fields are merged in that order. Failed attempts and expired worker leases
 Inject `DurableExecution` and wrap an operation in `checkpoint(key, input, operation)`. On retry, a completed checkpoint returns its stored result instead of repeating the operation:
 
 ```ts
-import { inject, signal } from "@tiberjs/runner";
+import { inject } from "@tiberjs/di";
+import { signal } from "@tiberjs/runner";
 import { DurableExecution, Job } from "@tiberjs/durable";
 
 @Job({ name: "page-length:v1", retry: { retries: 2 } })
@@ -98,6 +99,8 @@ Run `PageLength` with `manager.wrap(PageLength).run({ url })`, just like the fir
 - Await checkpoints and keep them unnested. Put branches, loops, and parallel orchestration in the handler.
 - Inputs and results must support structured cloning and the store's serialization format.
 
+A genuine failure that escapes a checkpoint operation fails the current Runner attempt, even if the handler catches the returned Job's rejection. Put same-attempt retry or fallback logic inside the operation; a durable retry starts the handler again in a new attempt. Cancelling only the checkpoint Job releases its reservation without turning that cancellation into a genuine attempt failure.
+
 ### Recovery limits
 
 Recovery starts at the beginning of the handler and reuses completed checkpoint results. It does **not** restore JavaScript locals, stacks, or running tasks. Code outside checkpoints runs again; put external effects and nondeterministic decisions inside checkpoints.
@@ -119,6 +122,6 @@ await worker.start();
 
 Here, `store` is your `ExecutionStore` implementation. Workers in separate processes need shared durable storage. `get()` retrieves existing work but does not start a worker.
 
-Configure dependencies with `manager.provide(Token, factory)` before starting jobs. Cancellation is cooperative: pass Runner's `signal()` to APIs such as `fetch`. A job remains `cancelling` until its attempt unwinds.
+Configure attempt-local dependencies with `manager.provide(Token, factory)` using tokens from `@tiberjs/di` before starting jobs. Cancellation is cooperative: pass Runner's `signal()` to APIs such as `fetch`. A job remains `cancelling` until its attempt unwinds.
 
 `await manager.close()` — also called by `await using` — stops claiming jobs, cancels and joins local attempts, and releases unfinished jobs for recovery while preserving checkpoints and retry budget. A process crash cannot run cleanup.

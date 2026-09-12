@@ -1,13 +1,15 @@
+import { Container, ContainerKey } from "@tiberjs/di";
+import type { Factory, InjectionToken } from "@tiberjs/di";
 import {
-  Scope,
   combinedError,
   currentAttachment,
   currentState,
   execute,
+  provide,
   runWith,
   signal,
 } from "@tiberjs/runner";
-import type { Factory, InjectionToken, RuntimeState } from "@tiberjs/runner";
+import type { RuntimeState } from "@tiberjs/runner";
 import type { ExecutionInfo, JobConstructor } from "../types.js";
 import type { ExecutionStore } from "../persistence/store.js";
 import { CheckpointRuntime, DurableExecution } from "./checkpoint.js";
@@ -38,13 +40,13 @@ export interface JobAttempt {
   readonly providers: readonly AttemptProvider[];
 }
 
-/** Wrap one logical job attempt in an independently owned Runner scope. */
+/** Wrap one logical job attempt in independently owned Runner and DI boundaries. */
 export async function executeJobAttempt(options: JobAttempt): Promise<unknown> {
-  const scope = new Scope(undefined, { startup: true });
+  const container = new Container();
   for (const provider of options.providers) {
-    scope.provide(provider.token, provider.factory);
+    container.provide(provider.token, provider.factory);
   }
-  scope.provide(
+  container.provide(
     DurableExecution,
     () => new CheckpointRuntime(options.store, options.executionId, options.activationId),
   );
@@ -60,25 +62,27 @@ export async function executeJobAttempt(options: JobAttempt): Promise<unknown> {
   let errors: unknown[] | undefined;
   let state: RuntimeState | undefined;
   try {
-    result = await execute({ signal: options.signal, attachment, scope }, async () => {
-      state = currentState();
-      const handler = scope.use(options.handler, () => new options.handler());
-      if (scope.startupPending) {
-        await scope.start();
-      } else {
-        scope.sealStartup();
-      }
-      return handler.run(options.input as never);
-    });
+    result = await execute(
+      {
+        signal: options.signal,
+        attachment,
+        values: [provide(ContainerKey, container)],
+      },
+      async () => {
+        state = currentState();
+        const handler = container.use(options.handler, () => new options.handler());
+        return handler.run(options.input as never);
+      },
+    );
   } catch (error) {
     (errors ??= []).push(error);
   }
 
   try {
     if (state) {
-      await runWith(state, () => scope[Symbol.asyncDispose]());
+      await runWith(state, () => container[Symbol.asyncDispose]());
     } else {
-      await scope[Symbol.asyncDispose]();
+      await container[Symbol.asyncDispose]();
     }
   } catch (error) {
     (errors ??= []).push(error);

@@ -1,14 +1,6 @@
-import {
-  combinedError,
-  contextKey,
-  currentState,
-  execute,
-  fork,
-  signal,
-  token,
-  use,
-} from "@tiberjs/runner";
-import type { Task } from "@tiberjs/runner";
+import { token } from "@tiberjs/di";
+import { combinedError, contextKey, execute, fork, provide, signal, use } from "@tiberjs/runner";
+import type { Job } from "@tiberjs/runner";
 import { ActivationLostError, CheckpointIdentityConflictError } from "../errors.js";
 import { fingerprint } from "../execution/record.js";
 import type { CheckpointMutation, ExecutionStore } from "../persistence/store.js";
@@ -19,14 +11,14 @@ export interface DurableExecution {
     key: string,
     input: Input,
     operation: () => Output | PromiseLike<Output>,
-  ): Task<Awaited<Output>>;
+  ): Job<Awaited<Output>>;
 }
 export const DurableExecution = token<DurableExecution>("tiberjs.manager.durable-execution");
 const InsideCheckpoint = contextKey<boolean>("tiberjs.manager.inside-checkpoint");
 
 interface InFlightCheckpoint {
   readonly fingerprint: string;
-  readonly task: Task<unknown>;
+  readonly task: Job<unknown>;
 }
 
 export class CheckpointRuntime implements DurableExecution {
@@ -42,7 +34,7 @@ export class CheckpointRuntime implements DurableExecution {
     key: string,
     input: Input,
     operation: () => Output | PromiseLike<Output>,
-  ): Task<Awaited<Output>> {
+  ): Job<Awaited<Output>> {
     if (typeof key !== "string" || key.length === 0)
       throw new TypeError("Checkpoint key must not be empty.");
     if (use(InsideCheckpoint))
@@ -104,17 +96,11 @@ export class CheckpointRuntime implements DurableExecution {
     try {
       // beginCheckpoint may finish after this task was cancelled; release its reservation too.
       currentSignal.throwIfAborted();
-      const state = currentState();
       // A nested Runner boundary joins checkpoint-local forks before committing the result.
-      // DI resources remain owned by the job scope; checkpoint-local resources use explicit using.
+      // DI resources remain owned by the attempt container; checkpoint-local resources use
+      // explicit disposal.
       result = await execute(
-        {
-          signal: currentSignal,
-          scope: state.scope,
-          attachment: state.attachment,
-          values: state.context.values.with({ [InsideCheckpoint.id]: true }),
-          deadline: state.context.deadline,
-        },
+        { values: [provide(InsideCheckpoint, true)] },
         async (): Promise<Awaited<Output>> => await operation(),
       );
       currentSignal.throwIfAborted();

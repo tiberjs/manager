@@ -1,4 +1,4 @@
-import type { Factory, InjectionToken } from "@tiberjs/runner";
+import type { Factory, InjectionToken } from "@tiberjs/di";
 import type { AttemptProvider } from "./runtime/attempt.js";
 import {
   ExecutionCancelledError,

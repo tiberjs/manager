@@ -8,6 +8,7 @@ on:
         required: true
         type: choice
         options:
+          - durable
           - di
           - eventbus
 
@@ -32,8 +33,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
-      # See ci.yml: @tiberjs/durable is excluded until it is migrated to the current runner.
-      - run: pnpm -r --filter '!@tiberjs/durable' build
-      - run: pnpm exec vitest run --project @tiberjs/di --project @tiberjs/eventbus
+      - run: pnpm build
+      - run: pnpm test
       - run: npm publish --access public --provenance
         working-directory: packages/${{ inputs.package }}
