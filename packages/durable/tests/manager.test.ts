@@ -3,7 +3,7 @@ import { fork, signal } from "@tiberjs/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DuplicateJobError,
-  DurableExecution,
+  CheckpointContext,
   DurableJob,
   ExecutionCancelledError,
   ExecutionFailedError,
@@ -311,7 +311,7 @@ describe("durable Runner jobs", () => {
     const Agent = define(
       "agent",
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(input: number): Promise<number> {
           runs += 1;
           const plan = await this.durable.checkpoint("plan", input, () => {

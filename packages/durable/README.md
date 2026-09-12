@@ -43,14 +43,17 @@ console.log(await execution);
 
 ### Execution model
 
-| Concept         | Lifetime and owner                                                                                               |
-| --------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `@DurableJob`   | Reconstructable handler definition registered in every worker; its stable name is the persisted identity.        |
-| `Execution<T>`  | Store-backed logical run that can span process restarts and multiple attempts.                                   |
-| Runner `Job<T>` | Process-local structured-concurrency boundary for one attempt, forked operation, or checkpoint; never persisted. |
-| DI `Container`  | Fresh for one attempt; owns the handler, resolved providers, and LIFO cleanup.                                   |
+| Concept             | Lifetime and owner                                                                                               |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `@DurableJob`       | Reconstructable handler definition registered in every worker; its stable name is the persisted identity.        |
+| `Execution<T>`      | Store-backed logical run and awaitable control handle spanning process restarts and multiple attempts.           |
+| Runner `Job<T>`     | Process-local structured-concurrency boundary for one attempt, forked operation, or checkpoint; never persisted. |
+| `CheckpointContext` | Attempt-local DI capability backed by the current execution ID, activation ID, and store.                        |
+| DI `Container`      | Fresh for one attempt; owns the handler, resolved providers, and LIFO cleanup.                                   |
 
 After a worker claims an execution, it starts the lease heartbeat and creates one Runner Job with the claim's abort signal. The Job attachment carries durable execution metadata, while `ContainerKey` binds the attempt container to the Job and every descendant. Runner joins the handler's child Jobs first; durable then disposes the container inside the captured Runner context, stops the heartbeat, and finally performs the fenced completion, failure, cancellation acknowledgement, or shutdown release.
+
+`Execution<T>` and `CheckpointContext` are not wrappers around each other. `Manager.run()` returns an `Execution<T>` that only identifies, observes, and cancels the logical stored run. `CheckpointContext` is never returned; the attempt container injects it only while a handler is running, and it uses that attempt's fenced activation to reserve, reuse, and commit checkpoints.
 
 ## Manage executions
 
@@ -80,19 +83,19 @@ Retry fields are merged in that order. Failed attempts and expired worker leases
 
 ## Keep completed work with checkpoints
 
-Inject `DurableExecution` and wrap an operation in `checkpoint(key, input, operation)`. On retry, a completed checkpoint returns its stored result instead of repeating the operation:
+Inject `CheckpointContext` and wrap an operation in `checkpoint(key, input, operation)`. On retry, a completed checkpoint returns its stored result instead of repeating the operation:
 
 ```ts
 import { inject } from "@tiberjs/di";
 import { signal } from "@tiberjs/runner";
-import { DurableExecution, DurableJob } from "@tiberjs/durable";
+import { CheckpointContext, DurableJob } from "@tiberjs/durable";
 
 @DurableJob({ name: "page-length:v1", retry: { retries: 2 } })
 class PageLength {
-  readonly durable = inject(DurableExecution);
+  readonly checkpoints = inject(CheckpointContext);
 
   async run(input: { url: string }): Promise<number> {
-    const page = await this.durable.checkpoint("fetch-page", input, async () => {
+    const page = await this.checkpoints.checkpoint("fetch-page", input, async () => {
       const response = await fetch(input.url, { signal: signal() });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.text();

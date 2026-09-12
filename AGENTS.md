@@ -45,7 +45,7 @@ There is no packed-artifact override any more; every runner dependency resolves 
 - `packages/durable/src/runtime/job-activation.ts`: Runner attempt, fenced completion and cancellation acknowledgement.
 - `packages/durable/src/runtime/lease.ts`: heartbeat renewal, interruption, and joined lease-monitor shutdown.
 - `packages/durable/src/runtime/attempt.ts`: fresh Runner Job and DI container, handler construction, cleanup, ambient metadata.
-- `packages/durable/src/runtime/checkpoint.ts`: injectable `DurableExecution` and Runner-owned checkpoint Jobs.
+- `packages/durable/src/runtime/checkpoint.ts`: injectable `CheckpointContext` and Runner-owned checkpoint Jobs.
 - `packages/durable/src/persistence/store.ts`: atomic persistence SPI.
 - `packages/durable/src/persistence/adapter/memory-store.ts`: clone-isolated reference adapter.
 - `packages/durable/src/types.ts`: named public job, execution, checkpoint, retry, and persisted-record contracts.
@@ -75,7 +75,7 @@ Checkpoint operations are leaves: nested checkpoints are rejected. Orchestrate i
 - Use standard TC39 decorators, never legacy `experimentalDecorators` or `reflect-metadata`.
 - `DurableJobInputOf` and `DurableJobOutputOf` infer handler types; parameterless durable jobs use `undefined` input.
 - `Execution<T>` remains `PromiseLike`, preserving `id`, `status()`, and `cancel()`.
-- `DurableExecution` is a package-owned DI token; user providers must not replace its attempt-local service. Its checkpoint method returns a Runner `Job`.
+- `CheckpointContext` is a package-owned, attempt-local DI capability, not an execution handle. User providers must not replace it. Its checkpoint method returns a Runner `Job`.
 - `currentExecution()` exposes execution ID, job name, attempt, and live signal.
 - Attempt-container disposal must retain the attempt's Runner context after its child Jobs have closed.
 - Admission failures are retained by handles until observation; constructing a handle must not create an unhandled rejection.

@@ -9,7 +9,7 @@ export {
   serializeError,
 } from "./errors.js";
 export { currentExecution } from "./runtime/attempt.js";
-export { DurableExecution } from "./runtime/checkpoint.js";
+export { CheckpointContext } from "./runtime/checkpoint.js";
 export { Manager, createManager } from "./manager.js";
 export type { ManagerOptions } from "./manager.js";
 export { MemoryStore } from "./persistence/adapter/memory-store.js";

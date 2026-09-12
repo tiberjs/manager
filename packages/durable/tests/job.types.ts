@@ -1,6 +1,6 @@
 import { inject } from "@tiberjs/di";
 import {
-  DurableExecution,
+  CheckpointContext,
   DurableJob,
   type Execution,
   type Manager,
@@ -9,7 +9,7 @@ import {
 
 @DurableJob("typed-job")
 class TypedJob {
-  readonly durable = inject(DurableExecution);
+  readonly durable = inject(CheckpointContext);
   async run(input: { value: number }): Promise<number> {
     return this.durable.checkpoint("read", input, () => input.value);
   }

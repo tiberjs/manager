@@ -12,11 +12,11 @@ import {
 import type { RuntimeState } from "@tiberjs/runner";
 import type { DurableJobConstructor, ExecutionInfo } from "../types.js";
 import type { ExecutionStore } from "../persistence/store.js";
-import { CheckpointRuntime, DurableExecution } from "./checkpoint.js";
+import { CheckpointRuntime, CheckpointContext } from "./checkpoint.js";
 
-const EXECUTION_ATTACHMENT = Symbol("tiberjs.manager.execution");
+const EXECUTION_ATTACHMENT = Symbol("tiberjs.durable.execution");
 
-interface ManagerAttachment {
+interface AttemptAttachment {
   readonly [EXECUTION_ATTACHMENT]: true;
   readonly executionId: string;
   readonly job: string;
@@ -47,11 +47,11 @@ export async function executeJobAttempt(options: AttemptOptions): Promise<unknow
     container.provide(provider.token, provider.factory);
   }
   container.provide(
-    DurableExecution,
+    CheckpointContext,
     () => new CheckpointRuntime(options.store, options.executionId, options.activationId),
   );
 
-  const attachment: ManagerAttachment = {
+  const attachment: AttemptAttachment = {
     [EXECUTION_ATTACHMENT]: true,
     executionId: options.executionId,
     job: options.job,
@@ -95,7 +95,7 @@ export async function executeJobAttempt(options: AttemptOptions): Promise<unknow
 }
 
 export function currentExecution(): ExecutionInfo {
-  const attachment = currentAttachment<ManagerAttachment | undefined>();
+  const attachment = currentAttachment<AttemptAttachment | undefined>();
   if (!attachment?.[EXECUTION_ATTACHMENT]) {
     throw new Error("The current Runner execution is not a durable job.");
   }

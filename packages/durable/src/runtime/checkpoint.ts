@@ -6,22 +6,22 @@ import { fingerprint } from "../execution/record.js";
 import type { CheckpointMutation, ExecutionStore } from "../persistence/store.js";
 
 /** Injectable attempt-local checkpoint service. Operations are leaf effects, not durable child jobs. */
-export interface DurableExecution {
+export interface CheckpointContext {
   checkpoint<Input, Output>(
     key: string,
     input: Input,
     operation: () => Output | PromiseLike<Output>,
   ): Job<Awaited<Output>>;
 }
-export const DurableExecution = token<DurableExecution>("tiberjs.manager.durable-execution");
-const InsideCheckpoint = contextKey<boolean>("tiberjs.manager.inside-checkpoint");
+export const CheckpointContext = token<CheckpointContext>("tiberjs.durable.checkpoint-context");
+const InsideCheckpoint = contextKey<boolean>("tiberjs.durable.inside-checkpoint");
 
 interface InFlightCheckpoint {
   readonly fingerprint: string;
   readonly task: Job<unknown>;
 }
 
-export class CheckpointRuntime implements DurableExecution {
+export class CheckpointRuntime implements CheckpointContext {
   private readonly inFlight = new Map<string, InFlightCheckpoint>();
 
   constructor(

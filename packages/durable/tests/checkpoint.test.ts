@@ -2,7 +2,7 @@ import { inject } from "@tiberjs/di";
 import { execute, fork, signal } from "@tiberjs/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  DurableExecution,
+  CheckpointContext,
   DurableJob,
   Manager,
   MemoryStore,
@@ -30,7 +30,7 @@ describe("durable checkpoints", () => {
     let calls = 0;
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<number> {
           const first = this.durable.checkpoint("shared", null, () => {
             calls += 1;
@@ -70,7 +70,7 @@ describe("durable checkpoints", () => {
     let effects = 0;
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<number> {
           const first = this.durable.checkpoint("reserved", null, () => {
             effects += 1;
@@ -102,7 +102,7 @@ describe("durable checkpoints", () => {
     let handlerRuns = 0;
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<number> {
           handlerRuns += 1;
           let value = 0;
@@ -134,7 +134,7 @@ describe("durable checkpoints", () => {
     let effects = 0;
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<number> {
           return this.durable.checkpoint("effect", currentExecution().attempt, () => {
             effects += 1;
@@ -156,7 +156,7 @@ describe("durable checkpoints", () => {
     let active = 0;
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<number[]> {
           const operation = async (): Promise<number> => {
             sameCalls += 1;
@@ -184,7 +184,7 @@ describe("durable checkpoints", () => {
     await expect(
       wrap(
         class {
-          readonly durable = inject(DurableExecution);
+          readonly durable = inject(CheckpointContext);
           async run(): Promise<undefined> {
             const operation = (): undefined => {
               calls += 1;
@@ -203,7 +203,7 @@ describe("durable checkpoints", () => {
     await expect(
       wrap(
         class {
-          readonly durable = inject(DurableExecution);
+          readonly durable = inject(CheckpointContext);
           async run(): Promise<number> {
             const result = await this.durable.checkpoint("value", null, () => ({ count: 42 }));
             result.count = 100;
@@ -219,7 +219,7 @@ describe("durable checkpoints", () => {
     const store = new MemoryStore();
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<number> {
           return this.durable.checkpoint("child", null, () => {
             operations += 1;
@@ -243,7 +243,7 @@ describe("durable checkpoints", () => {
     const failed = Promise.withResolvers<void>();
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<void> {
           this.durable.checkpoint("unobserved", null, () => {
             failed.resolve();
@@ -261,7 +261,7 @@ describe("durable checkpoints", () => {
     let calls = 0;
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<number> {
           handlerRuns += 1;
           try {
@@ -286,7 +286,7 @@ describe("durable checkpoints", () => {
   it("prevents recursive checkpoint operations rather than deadlocking on their reservation", async () => {
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<number> {
           return this.durable.checkpoint("recursive", null, () =>
             this.durable.checkpoint("recursive", null, () => 42),
@@ -302,7 +302,7 @@ describe("durable checkpoints", () => {
     const store = new MemoryStore();
     const execution = wrap(
       class {
-        readonly durable = inject(DurableExecution);
+        readonly durable = inject(CheckpointContext);
         async run(): Promise<number> {
           return this.durable.checkpoint("cancel", null, async () => {
             const aborted = Promise.withResolvers<void>();
