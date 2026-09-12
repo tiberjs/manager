@@ -320,7 +320,7 @@ describe("durable checkpoints", () => {
     await execution.cancel();
     await rejected;
     await expect(store.load(execution.id)).resolves.toMatchObject({
-      status: "cancelled",
+      projection: { status: "cancelled" },
       checkpoints: { cancel: { status: "pending" } },
     });
   });

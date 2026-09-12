@@ -1,4 +1,9 @@
-import type { ExecutionRecord, ExecutionStatus, SerializedError } from "../types.js";
+import type {
+  ExecutionRecord,
+  ExecutionStatus,
+  SerializedError,
+  StoredExecutionEvent,
+} from "../types.js";
 
 export interface CreateExecutionResult {
   readonly execution: ExecutionRecord;
@@ -48,6 +53,7 @@ export type BeginCheckpointResult =
 export interface ExecutionStore {
   create(record: ExecutionRecord): Promise<CreateExecutionResult>;
   load(id: string): Promise<ExecutionRecord | null>;
+  readEvents(id: string): Promise<readonly StoredExecutionEvent[]>;
   claim(options: ClaimExecutionOptions): Promise<ClaimedExecution | null>;
   heartbeat(
     mutation: ExecutionMutation,

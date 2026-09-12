@@ -11,8 +11,11 @@ export {
 export { currentExecution } from "./runtime/attempt.js";
 export { CheckpointContext } from "./runtime/checkpoint.js";
 export { Manager, createManager } from "./manager.js";
+export { replayExecutionLedger } from "./execution/ledger.js";
 export type { ManagerOptions } from "./manager.js";
 export { MemoryStore } from "./persistence/adapter/memory-store.js";
+export { SQLiteAdapter } from "./persistence/adapter/sqlite-adapter.js";
+export type { SQLiteAdapterOptions } from "./persistence/adapter/sqlite-adapter.js";
 export type {
   BeginCheckpointResult,
   CheckpointMutation,
@@ -27,11 +30,15 @@ export type {
 export { DurableJob } from "./job/definition.js";
 export type {
   CheckpointRecord,
+  ActivationLease,
   Execution,
   ExecutionInfo,
   ExecutionOptions,
   ExecutionRecord,
+  ExecutionEvent,
+  ExecutionProjection,
   ExecutionStatus,
+  ExecutionSubmission,
   DurableJobConstructor,
   DurableJobHandler,
   DurableJobInputOf,
@@ -39,6 +46,7 @@ export type {
   DurableJobOutputOf,
   RetryPolicy,
   SerializedError,
+  StoredExecutionEvent,
   StoredRetryPolicy,
   WrappedDurableJob,
 } from "./types.js";

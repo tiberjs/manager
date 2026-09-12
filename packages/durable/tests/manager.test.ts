@@ -1,4 +1,4 @@
-import { inject, onDispose, token } from "@tiberjs/di";
+import { Container, inject, onDispose, token } from "@tiberjs/di";
 import { fork, signal } from "@tiberjs/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -278,6 +278,54 @@ describe("durable Runner jobs", () => {
     expect([constructions, effects, disposals]).toEqual([2, 2, 2]);
   });
 
+  it("borrows application-container services while recreating attempt-local state", async () => {
+    const application = new Container();
+    const Shared = token<object>("shared");
+    let constructions = 0;
+    let disposals = 0;
+    let handlerConstructions = 0;
+    let attempts = 0;
+    const identities: object[] = [];
+    application.provide(Shared, () => {
+      constructions += 1;
+      onDispose(() => {
+        disposals += 1;
+      });
+      return {};
+    });
+    const Retried = define(
+      { name: "server-container", retry: { retries: 1 } },
+      class {
+        private readonly shared = inject(Shared);
+
+        constructor() {
+          handlerConstructions += 1;
+        }
+
+        run(): number {
+          identities.push(this.shared);
+          attempts += 1;
+          if (attempts === 1) throw new Error("retry");
+          return 42;
+        }
+      },
+    );
+    try {
+      const durable = create(undefined, { parentContainer: application });
+      await expect(durable.wrap(Retried).run(undefined)).resolves.toBe(42);
+      await durable.close();
+      expect({ constructions, disposals, handlerConstructions }).toEqual({
+        constructions: 1,
+        disposals: 0,
+        handlerConstructions: 2,
+      });
+      expect(identities[0]).toBe(identities[1]);
+    } finally {
+      await application[Symbol.asyncDispose]();
+    }
+    expect(disposals).toBe(1);
+  });
+
   it("persists a genuine Runner child failure as an attempt failure", async () => {
     let runs = 0;
     const store = new MemoryStore();
@@ -299,10 +347,7 @@ describe("durable Runner jobs", () => {
     const execution = create(store).wrap(Retried).run(undefined);
     await expect(execution).resolves.toBe(42);
     await expect(store.load(execution.id)).resolves.toMatchObject({
-      status: "completed",
-      attempt: 2,
-      failures: 1,
-      result: 42,
+      projection: { status: "completed", attempt: 2, failures: 1, result: 42 },
     });
   });
 
@@ -364,8 +409,7 @@ describe("durable Runner jobs", () => {
     await blocked.promise;
     await first.close();
     await expect(store.load(original.id)).resolves.toMatchObject({
-      status: "pending",
-      failures: 0,
+      projection: { status: "pending", failures: 0 },
       checkpoints: {
         plan: { status: "completed" },
         "tool:double": { status: "completed", result: 42 },
@@ -472,7 +516,9 @@ describe("durable Runner jobs", () => {
     await execution.cancel();
     await manager.close();
     await expect(rejection).resolves.toBeInstanceOf(ExecutionCancelledError);
-    await expect(store.load(execution.id)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(store.load(execution.id)).resolves.toMatchObject({
+      projection: { status: "cancelled" },
+    });
   });
 
   it("provides attempt DI and metadata and commits only after cleanup", async () => {
@@ -659,8 +705,8 @@ describe("durable Runner jobs", () => {
     await closing;
     expect(runs).toBe(0);
     await expect(store.load(execution.id)).resolves.toMatchObject({
-      status: "pending",
-      activationId: undefined,
+      projection: { status: "pending" },
+      activation: undefined,
     });
   });
 });

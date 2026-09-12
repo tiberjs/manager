@@ -56,12 +56,44 @@ export type DurableJobOutputOf<Definition extends DurableJobConstructor> = Await
 export interface Execution<T> extends PromiseLike<T> {
   readonly id: string;
   status(): Promise<ExecutionStatus>;
+  history(): Promise<readonly StoredExecutionEvent[]>;
   cancel(reason?: unknown): Promise<void>;
 }
 
 export interface WrappedDurableJob<Input, Output> {
   run(input: Input, options?: ExecutionOptions): Execution<Output>;
   get(id: string): Execution<Output>;
+}
+
+/** Immutable admission data. Retry and input are snapshots fixed for the execution lifetime. */
+export interface ExecutionSubmission {
+  readonly id: string;
+  readonly key?: string;
+  readonly job: string;
+  readonly input: unknown;
+  readonly inputFingerprint: string;
+  readonly retry: StoredRetryPolicy;
+  readonly createdAt: number;
+}
+
+/** Materialized logical state. `revision` is the last appended semantic event sequence. */
+export interface ExecutionProjection {
+  readonly revision: number;
+  readonly status: ExecutionStatus;
+  readonly attempt: number;
+  readonly failures: number;
+  readonly availableAt: number;
+  readonly updatedAt: number;
+  readonly result?: unknown;
+  readonly error?: SerializedError;
+  readonly cancellationReason?: SerializedError;
+}
+
+/** Mutable worker ownership. It exists only while an attempt owns the execution. */
+export interface ActivationLease {
+  readonly activationId: string;
+  readonly workerId: string;
+  readonly leaseExpiresAt: number;
 }
 
 export type CheckpointRecord = {
@@ -73,26 +105,81 @@ export type CheckpointRecord = {
   | { readonly status: "completed"; readonly result: unknown }
 );
 
+/** Aggregate read model assembled from immutable, projected, and operational persistence. */
 export interface ExecutionRecord {
-  readonly id: string;
-  readonly key?: string;
-  readonly job: string;
-  readonly input: unknown;
-  readonly inputFingerprint: string;
-  readonly status: ExecutionStatus;
-  readonly attempt: number;
-  readonly failures: number;
-  readonly retry: StoredRetryPolicy;
-  readonly availableAt: number;
-  readonly activationId?: string;
-  readonly workerId?: string;
-  readonly leaseExpiresAt?: number;
+  readonly submission: ExecutionSubmission;
+  readonly projection: ExecutionProjection;
+  readonly activation?: ActivationLease;
   readonly checkpoints: Readonly<Record<string, CheckpointRecord>>;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-  readonly result?: unknown;
-  readonly error?: SerializedError;
-  readonly cancellationReason?: SerializedError;
+}
+
+interface EventBase {
+  readonly at: number;
+}
+
+export type ExecutionEvent =
+  | (EventBase & {
+      readonly type: "execution-submitted";
+      readonly submission: ExecutionSubmission;
+    })
+  | (EventBase & {
+      readonly type: "attempt-started";
+      readonly attempt: number;
+      readonly activationId: string;
+      readonly workerId: string;
+    })
+  | (EventBase & {
+      readonly type: "attempt-failed";
+      readonly attempt: number;
+      readonly activationId: string;
+      readonly failure: number;
+      readonly error: SerializedError;
+      readonly retryAt?: number;
+    })
+  | (EventBase & {
+      readonly type: "attempt-released";
+      readonly attempt: number;
+      readonly activationId: string;
+      readonly reason: "manager-shutdown";
+    })
+  | (EventBase & {
+      readonly type: "activation-expired";
+      readonly attempt: number;
+      readonly activationId: string;
+      readonly failure: number;
+      readonly retryAt?: number;
+    })
+  | (EventBase & {
+      readonly type: "cancellation-requested";
+      readonly reason: SerializedError;
+    })
+  | (EventBase & {
+      readonly type: "execution-cancelled";
+      readonly activationId?: string;
+    })
+  | (EventBase & {
+      readonly type: "execution-completed";
+      readonly attempt: number;
+      readonly activationId: string;
+      readonly result: unknown;
+    })
+  | (EventBase & {
+      readonly type: "checkpoint-declared";
+      readonly key: string;
+      readonly inputFingerprint: string;
+    })
+  | (EventBase & {
+      readonly type: "checkpoint-completed";
+      readonly key: string;
+      readonly inputFingerprint: string;
+      readonly activationId: string;
+      readonly result: unknown;
+    });
+
+export interface StoredExecutionEvent {
+  readonly executionId: string;
+  readonly sequence: number;
+  readonly event: ExecutionEvent;
 }
 
 export interface ExecutionInfo {

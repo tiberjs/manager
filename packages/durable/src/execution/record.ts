@@ -15,23 +15,28 @@ export function createExecutionRecord(
   }
   const snapshot = structuredClone(input);
   return {
-    id: options.key
-      ? createHash("sha256")
-          .update(JSON.stringify([job.name, options.key]))
-          .digest("hex")
-      : randomUUID(),
-    ...(options.key ? { key: options.key } : {}),
-    job: job.name,
-    input: snapshot,
-    inputFingerprint: fingerprint(snapshot),
-    status: "pending",
-    attempt: 0,
-    failures: 0,
-    retry: normalizePolicy(options.retry, job.retry),
-    availableAt: now,
+    submission: {
+      id: options.key
+        ? createHash("sha256")
+            .update(JSON.stringify([job.name, options.key]))
+            .digest("hex")
+        : randomUUID(),
+      ...(options.key ? { key: options.key } : {}),
+      job: job.name,
+      input: snapshot,
+      inputFingerprint: fingerprint(snapshot),
+      retry: normalizePolicy(options.retry, job.retry),
+      createdAt: now,
+    },
+    projection: {
+      revision: 0,
+      status: "pending",
+      attempt: 0,
+      failures: 0,
+      availableAt: now,
+      updatedAt: now,
+    },
     checkpoints: {},
-    createdAt: now,
-    updatedAt: now,
   };
 }
 

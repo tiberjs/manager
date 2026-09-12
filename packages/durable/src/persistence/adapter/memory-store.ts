@@ -9,34 +9,47 @@ import {
   recoverExpiredExecution,
   releaseExecution,
 } from "../../execution/state.js";
+import type { ExecutionTransition } from "../../execution/state.js";
 import {
   beginExecutionCheckpoint,
   completeExecutionCheckpoint,
   releaseExecutionCheckpoint,
 } from "../../execution/checkpoint-state.js";
+import { commitTransition } from "../../execution/ledger.js";
 import type {
   BeginCheckpointResult,
   CheckpointMutation,
   ClaimedExecution,
   ClaimExecutionOptions,
   CreateExecutionResult,
-  ExecutionStore,
-  HeartbeatResult,
   ExecutionFailure,
   ExecutionMutation,
+  ExecutionStore,
+  HeartbeatResult,
 } from "../store.js";
-import type { ExecutionRecord, SerializedError } from "../../types.js";
+import type { ExecutionRecord, SerializedError, StoredExecutionEvent } from "../../types.js";
 
-/** Clone-isolated reference adapter; all read/modify/write operations are synchronous and atomic. */
+/** Clone-isolated reference adapter with an append-only semantic ledger. */
 export class MemoryStore implements ExecutionStore {
   private readonly executions = new Map<string, ExecutionRecord>();
+  private readonly ledger = new Map<string, StoredExecutionEvent[]>();
 
   async create(record: ExecutionRecord): Promise<CreateExecutionResult> {
-    const existing = this.executions.get(record.id);
+    const id = record.submission.id;
+    const existing = this.executions.get(id);
     if (existing) return { execution: structuredClone(existing), created: false };
     const stored = structuredClone(record);
-    this.executions.set(stored.id, stored);
-    return { execution: structuredClone(stored), created: true };
+    const execution = this.persist(undefined, {
+      execution: stored,
+      events: [
+        {
+          type: "execution-submitted",
+          submission: stored.submission,
+          at: stored.submission.createdAt,
+        },
+      ],
+    });
+    return { execution: structuredClone(execution), created: true };
   }
 
   async load(id: string): Promise<ExecutionRecord | null> {
@@ -44,28 +57,33 @@ export class MemoryStore implements ExecutionStore {
     return execution ? structuredClone(execution) : null;
   }
 
+  async readEvents(id: string): Promise<readonly StoredExecutionEvent[]> {
+    return structuredClone(this.ledger.get(id) ?? []);
+  }
+
   async claim(options: ClaimExecutionOptions): Promise<ClaimedExecution | null> {
     const jobs = new Set(options.jobs);
     let selected: ExecutionRecord | undefined;
     for (const execution of this.executions.values()) {
       if (
-        execution.status !== "pending" ||
-        execution.availableAt > options.now ||
-        !jobs.has(execution.job)
+        execution.projection.status !== "pending" ||
+        execution.projection.availableAt > options.now ||
+        !jobs.has(execution.submission.job)
       )
         continue;
       if (
         !selected ||
-        execution.createdAt < selected.createdAt ||
-        (execution.createdAt === selected.createdAt && execution.id < selected.id)
+        execution.submission.createdAt < selected.submission.createdAt ||
+        (execution.submission.createdAt === selected.submission.createdAt &&
+          execution.submission.id < selected.submission.id)
       )
         selected = execution;
     }
     if (!selected) return null;
     const activationId = randomUUID();
-    const execution = claimExecution(selected, options, activationId);
-    if (!execution) return null;
-    this.executions.set(execution.id, execution);
+    const transition = claimExecution(selected, options, activationId);
+    if (!transition) return null;
+    const execution = this.persist(selected, transition);
     return { execution: structuredClone(execution), activationId };
   }
 
@@ -77,13 +95,16 @@ export class MemoryStore implements ExecutionStore {
     const current = this.executions.get(mutation.executionId);
     if (!current) return "lost";
     const transition = heartbeatExecution(current, mutation, workerId, leaseExpiresAt);
-    if (transition.execution) this.executions.set(current.id, transition.execution);
+    if (transition.execution) {
+      this.persist(current, { execution: transition.execution, events: [] });
+    }
     return transition.result;
   }
 
   async complete(mutation: ExecutionMutation, result: unknown): Promise<boolean> {
+    const storedResult = structuredClone(result);
     return this.update(mutation.executionId, (current) =>
-      completeExecution(current, mutation, structuredClone(result)),
+      completeExecution(current, mutation, storedResult),
     );
   }
 
@@ -103,15 +124,16 @@ export class MemoryStore implements ExecutionStore {
   }
 
   async cancel(id: string, reason: SerializedError, now: number): Promise<boolean> {
-    return this.update(id, (current) => cancelExecution(current, structuredClone(reason), now));
+    const storedReason = structuredClone(reason);
+    return this.update(id, (current) => cancelExecution(current, storedReason, now));
   }
 
   async recoverExpired(now: number): Promise<number> {
     let recovered = 0;
-    for (const [id, current] of this.executions) {
-      const execution = recoverExpiredExecution(current, now);
-      if (execution) {
-        this.executions.set(id, execution);
+    for (const current of this.executions.values()) {
+      const transition = recoverExpiredExecution(current, now);
+      if (transition) {
+        this.persist(current, transition);
         recovered += 1;
       }
     }
@@ -121,14 +143,15 @@ export class MemoryStore implements ExecutionStore {
   async beginCheckpoint(mutation: CheckpointMutation): Promise<BeginCheckpointResult> {
     const current = this.executions.get(mutation.executionId);
     if (!current) return { status: "lost" };
-    const transition = beginExecutionCheckpoint(current, mutation);
-    if (transition.execution) this.executions.set(current.id, transition.execution);
-    return structuredClone(transition.outcome);
+    const checkpoint = beginExecutionCheckpoint(current, mutation);
+    if (checkpoint.transition) this.persist(current, checkpoint.transition);
+    return structuredClone(checkpoint.outcome);
   }
 
   async completeCheckpoint(mutation: CheckpointMutation, result: unknown): Promise<boolean> {
+    const storedResult = structuredClone(result);
     return this.update(mutation.executionId, (current) =>
-      completeExecutionCheckpoint(current, mutation, structuredClone(result)),
+      completeExecutionCheckpoint(current, mutation, storedResult),
     );
   }
 
@@ -140,13 +163,27 @@ export class MemoryStore implements ExecutionStore {
 
   private update(
     id: string,
-    transition: (current: ExecutionRecord) => ExecutionRecord | undefined,
+    transition: (current: ExecutionRecord) => ExecutionTransition | undefined,
   ): boolean {
     const current = this.executions.get(id);
     if (!current) return false;
     const updated = transition(current);
     if (!updated) return false;
-    this.executions.set(id, updated);
+    this.persist(current, updated);
     return true;
+  }
+
+  private persist(
+    current: ExecutionRecord | undefined,
+    transition: ExecutionTransition,
+  ): ExecutionRecord {
+    const committed = commitTransition(current, transition);
+    const id = committed.execution.submission.id;
+    const execution = structuredClone(committed.execution);
+    this.executions.set(id, execution);
+    if (committed.events.length > 0) {
+      this.ledger.set(id, [...(this.ledger.get(id) ?? []), ...structuredClone(committed.events)]);
+    }
+    return execution;
   }
 }

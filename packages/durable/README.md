@@ -4,7 +4,7 @@ Run [Runner](https://github.com/tiberjs/runner) handlers as durable jobs: submit
 
 Requires **Node.js 24+** and TypeScript compiled with standard decorators (for example `target: "ES2023"`, `module: "NodeNext"`), not legacy `experimentalDecorators`. Node does not run decorator syntax directly.
 
-**Storage:** the included `MemoryStore` is in-memory only. Jobs survive process restarts only with a durable [`ExecutionStore`](src/persistence/store.ts) implementation; this package does not ship one yet.
+**Storage:** `SQLiteAdapter` stores the semantic ledger, materialized projections, activation leases, and checkpoint state in SQLite. `MemoryStore` implements the same contract without filesystem persistence.
 
 ## Installation
 
@@ -18,7 +18,7 @@ Add `@DurableJob` to a class with a `run(input)` method, then wrap it with a man
 
 ```ts
 import { fork } from "@tiberjs/runner";
-import { DurableJob, MemoryStore, createManager } from "@tiberjs/durable";
+import { DurableJob, SQLiteAdapter, createManager } from "@tiberjs/durable";
 
 @DurableJob({ name: "research:v1", retry: { retries: 3, delayMs: 250 } })
 class Research {
@@ -31,7 +31,8 @@ class Research {
   }
 }
 
-await using manager = createManager({ store: new MemoryStore(), concurrency: 8 });
+using store = new SQLiteAdapter("./durable.sqlite");
+await using manager = createManager({ store, concurrency: 8 });
 const research = manager.wrap(Research);
 const execution = research.run({ query: "structured concurrency" }, { key: "research:42" });
 
@@ -57,8 +58,34 @@ After a worker claims an execution, it starts the lease heartbeat and creates on
 
 ### Persistent state machine
 
-Persistence does not store Runner's `Job` tree or lifecycle. It stores one logical execution and
-the lease that fences its current process-local attempt:
+Persistence has three explicit parts:
+
+| Part                    | Contents                                                                           | Mutation model                                            |
+| ----------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| Semantic ledger         | Submission, attempt, terminal, cancellation, and checkpoint facts                  | Append-only events with contiguous per-execution sequence |
+| Materialized projection | Current status, attempt, failures, schedule, result, error, and checkpoint results | Updated atomically with each semantic event               |
+| Operational ownership   | Activation ID, worker ID, lease deadline, and checkpoint reservations              | Fenced mutable updates; heartbeat does not append events  |
+
+`ExecutionRecord` is the aggregate read model:
+
+```text
+ExecutionRecord
+  submission   immutable input, job identity, and retry policy
+  projection   current logical state and ledger revision
+  activation   optional live worker lease
+  checkpoints  checkpoint projections and reservations
+```
+
+The ledger contains `execution-submitted`, `attempt-started`, `attempt-failed`,
+`attempt-released`, `activation-expired`, `cancellation-requested`,
+`execution-cancelled`, `execution-completed`, `checkpoint-declared`, and
+`checkpoint-completed`. `replayExecutionLedger()` reconstructs semantic state from those events;
+live leases and running checkpoint reservations are operational overlays.
+
+Semantic transitions append events and update their projection in one atomic store operation.
+Heartbeat renewals update only the lease deadline. Reserving or releasing an already-declared
+checkpoint updates only its operational projection. A checkpoint's first declaration and
+completion are semantic events.
 
 ```text
 pending ── claim ──> running ── complete ───────────────> completed
@@ -72,27 +99,21 @@ pending ── claim ──> running ── complete ─────────
                               teardown acknowledgement / expired lease
 ```
 
-`running` means that an activation ID, worker ID, and unexpired lease own the persisted execution;
-it does not mean only that the JavaScript handler body is running. The execution remains `running`
-while Runner joins descendants, DI disposes the attempt container, and durable prepares the final
-atomic write. `cancelling` means the request is durable but the owner has not finished unwinding.
+`running` means that an activation ID, worker ID, and unexpired lease own the execution. It spans
+handler execution, Runner descendant joining, DI cleanup, and preparation of the final atomic
+write. `cancelling` means that cancellation is durable while the owner is still unwinding.
 
-`JobActivationRunner` maps the process-local attempt outcome to that state machine:
+`JobActivationRunner` maps the process-local boundary only after Runner and DI teardown:
 
-| Attempt boundary after Runner and DI teardown | Persisted transition                                                |
-| --------------------------------------------- | ------------------------------------------------------------------- |
-| Resolved                                      | `running → completed`                                               |
-| Genuine failure                               | `running → pending` for retry, otherwise `running → failed`         |
-| Persisted cancellation request                | `cancelling → cancelled`                                            |
-| Manager shutdown abort                        | `running → pending` without consuming retry budget                  |
-| Lost activation or lease                      | No stale write; expiration recovery performs retry/failure          |
-| Heartbeat or store infrastructure failure     | No false success/failure write; surface the error and recover lease |
+| Attempt outcome or authority | Persisted transition                                               |
+| ---------------------------- | ------------------------------------------------------------------ |
+| Resolved                     | Fenced `running → completed`                                       |
+| Genuine failure              | Fenced `running → pending` for retry, otherwise `running → failed` |
+| Persisted cancellation       | `cancelling → cancelled`                                           |
+| Manager shutdown abort       | `running → pending` without consuming retry budget                 |
+| Lost activation or lease     | No stale write; expiration recovery performs the transition        |
 
-Every result, failure, and checkpoint mutation compares the execution ID and activation ID.
-Success, failure, and checkpoint writes also require the lease to remain live. A rejected fenced
-write cannot overwrite a newer attempt.
-
-Persisted checkpoint state is separate:
+Checkpoint state is separate:
 
 ```text
 absent / pending ── reserve for activation ──> running
@@ -101,9 +122,9 @@ absent / pending ── reserve for activation ──> running
                                                   └── success ──> completed
 ```
 
-`pending` retains the checkpoint key and input fingerprint without an owner. `running` always has
-an activation ID. `completed` retains the cloned result and never changes. An execution cannot
-commit while one of its checkpoints remains `running`.
+`pending` retains key and input identity without ownership. `running` always has an activation ID.
+`completed` retains the cloned result and never changes. An execution cannot commit while any
+checkpoint remains `running`.
 
 ## Manage executions
 
@@ -113,6 +134,7 @@ The value returned by `run()` is an awaitable `Execution<T>`, with an ID and con
 | ---------------------------------- | ------------------------------------------------------------------------------- |
 | `await execution`                  | Wait for the result; reject if the job fails or is cancelled.                   |
 | `await execution.status()`         | Read `pending`, `running`, `cancelling`, `completed`, `failed`, or `cancelled`. |
+| `await execution.history()`        | Read the ordered semantic ledger for this execution.                            |
 | `await execution.cancel(reason)`   | Request cancellation.                                                           |
 | `await research.get(execution.id)` | Retrieve the result of an existing execution.                                   |
 
@@ -187,5 +209,37 @@ await worker.start();
 Here, `store` is your `ExecutionStore` implementation. Workers in separate processes need shared durable storage. `get()` retrieves existing work but does not start a worker.
 
 Configure attempt-local dependencies with `manager.provide(Token, factory)` using tokens from `@tiberjs/di` before starting jobs. Cancellation is cooperative: pass Runner's `signal()` to APIs such as `fetch`. A job remains `cancelling` until its attempt unwinds.
+
+### Attempt DI in server processes
+
+The attempt container is independent of an HTTP request container. A request submits cloned input
+and may retain the returned `Execution<T>`; request-scoped objects must not be captured because a
+retry may run later or in another worker.
+
+A fresh container makes an in-process retry equivalent to crash recovery: it constructs a new
+handler, receives a new cancellation signal and activation-bound `CheckpointContext`, and disposes
+all attempt-owned resources before the result commits. Only persisted input and completed
+checkpoints cross attempts.
+
+Application-lifetime clients are inherited from an explicit parent container:
+
+```ts
+import { Container } from "@tiberjs/di";
+
+const application = new Container();
+application.provide(DatabasePool, () => new DatabasePool());
+
+await using manager = createManager({
+  store,
+  parentContainer: application,
+});
+```
+
+Each attempt is a child of `application`, so it resolves the same application-owned pool. The
+Manager never disposes the supplied parent. `manager.provide(Token, factory)` remains attempt-local;
+use it for sessions, transactions, caches, or signal-aware resources and register `onDispose()` for
+their cleanup.
+Register constructible classes through `manager.provide()` when they must remain attempt-local;
+otherwise normal DI ancestor resolution may construct them in the application root.
 
 `await manager.close()` — also called by `await using` — stops claiming jobs, cancels and joins local attempts, and releases unfinished jobs for recovery while preserving checkpoints and retry budget. A process crash cannot run cleanup.

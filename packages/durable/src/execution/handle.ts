@@ -1,7 +1,13 @@
-import type { Execution, ExecutionRecord, ExecutionStatus } from "../types.js";
+import type {
+  Execution,
+  ExecutionRecord,
+  ExecutionStatus,
+  StoredExecutionEvent,
+} from "../types.js";
 
 export interface ExecutionHost {
   load(id: string): Promise<ExecutionRecord>;
+  history(id: string): Promise<readonly StoredExecutionEvent[]>;
   wait<T>(id: string): Promise<T>;
   cancel(id: string, reason?: unknown): Promise<void>;
 }
@@ -32,7 +38,12 @@ export class ManagedExecution<T> implements Execution<T> {
 
   async status(): Promise<ExecutionStatus> {
     await this.waitUntilReady();
-    return (await this.host.load(this.id)).status;
+    return (await this.host.load(this.id)).projection.status;
+  }
+
+  async history(): Promise<readonly StoredExecutionEvent[]> {
+    await this.waitUntilReady();
+    return await this.host.history(this.id);
   }
 
   async cancel(reason?: unknown): Promise<void> {

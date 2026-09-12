@@ -1,3 +1,4 @@
+import type { Container } from "@tiberjs/di";
 import { combinedError } from "@tiberjs/runner";
 import { serializeError } from "../errors.js";
 import { retryAt } from "../execution/retry.js";
@@ -11,6 +12,7 @@ export interface JobActivationOptions {
   readonly store: ExecutionStore;
   readonly registry: DurableJobRegistry;
   readonly providers: readonly AttemptProvider[];
+  readonly parentContainer?: Container;
   readonly workerId: string;
   readonly leaseDurationMs: number;
   readonly heartbeatIntervalMs: number;
@@ -30,18 +32,19 @@ export class JobActivationRunner {
   }
 
   async run(claimed: ClaimedExecution, controller: AbortController): Promise<void> {
-    const registered = this.options.registry.find(claimed.execution.job);
+    const registered = this.options.registry.find(claimed.execution.submission.job);
     if (!registered) {
-      throw new Error(`Registered job is missing ${claimed.execution.job}.`);
+      throw new Error(`Registered job is missing ${claimed.execution.submission.job}.`);
     }
+    const executionId = claimed.execution.submission.id;
     const mutation: ExecutionMutation = {
-      executionId: claimed.execution.id,
+      executionId,
       activationId: claimed.activationId,
       now: Date.now(),
     };
     const heartbeat = new ActivationLease({
       store: this.options.store,
-      executionId: claimed.execution.id,
+      executionId,
       activationId: claimed.activationId,
       workerId: this.options.workerId,
       durationMs: this.options.leaseDurationMs,
@@ -54,14 +57,15 @@ export class JobActivationRunner {
       outcome = {
         status: "succeeded",
         result: await executeJobAttempt({
-          executionId: claimed.execution.id,
+          executionId,
           job: registered.name,
           activationId: claimed.activationId,
           store: this.options.store,
-          attempt: claimed.execution.attempt,
+          attempt: claimed.execution.projection.attempt,
           handler: registered.type,
-          input: claimed.execution.input,
+          input: claimed.execution.submission.input,
           signal: controller.signal,
+          parentContainer: this.options.parentContainer,
           providers: this.options.providers,
         }),
       };
@@ -92,11 +96,11 @@ export class JobActivationRunner {
 
     const now = Date.now();
     const currentMutation = { ...mutation, now };
-    const current = await this.options.store.load(claimed.execution.id);
-    if (!current || current.status === "cancelled") {
+    const current = await this.options.store.load(executionId);
+    if (!current || current.projection.status === "cancelled") {
       return undefined;
     }
-    if (current.status === "cancelling" || heartbeat.result === "cancel-requested") {
+    if (current.projection.status === "cancelling" || heartbeat.result === "cancel-requested") {
       await this.options.store.acknowledgeCancellation(currentMutation);
       return undefined;
     }
@@ -106,11 +110,11 @@ export class JobActivationRunner {
     } else if (outcome.status === "succeeded") {
       persisted = await this.options.store.complete(currentMutation, outcome.result);
     } else {
-      const failureNumber = claimed.execution.failures + 1;
+      const failureNumber = claimed.execution.projection.failures + 1;
       persisted = await this.options.store.fail({
         ...currentMutation,
         error: serializeError(outcome.error),
-        retryAt: retryAt(claimed.execution.retry, failureNumber, now),
+        retryAt: retryAt(claimed.execution.submission.retry, failureNumber, now),
       });
     }
     if (!persisted) {

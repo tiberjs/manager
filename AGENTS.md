@@ -46,8 +46,9 @@ There is no packed-artifact override any more; every runner dependency resolves 
 - `packages/durable/src/runtime/lease.ts`: heartbeat renewal, interruption, and joined lease-monitor shutdown.
 - `packages/durable/src/runtime/attempt.ts`: fresh Runner Job and DI container, handler construction, cleanup, ambient metadata.
 - `packages/durable/src/runtime/checkpoint.ts`: injectable `CheckpointContext` and Runner-owned checkpoint Jobs.
-- `packages/durable/src/persistence/store.ts`: atomic persistence SPI.
-- `packages/durable/src/persistence/adapter/memory-store.ts`: clone-isolated reference adapter.
+- `packages/durable/src/persistence/store.ts`: atomic ledger, projection, lease, and checkpoint SPI.
+- `packages/durable/src/persistence/adapter/memory-store.ts`: clone-isolated in-memory reference adapter.
+- `packages/durable/src/persistence/adapter/sqlite-adapter.ts`: file-backed SQLite implementation using separate submission, projection, lease, checkpoint, and event tables.
 - `packages/durable/src/types.ts`: named public job, execution, checkpoint, retry, and persisted-record contracts.
 - `packages/durable/src/index.ts` and `packages/durable/src/errors.ts`: the single public entry and the named error types it re-exports.
 - `packages/durable/tests/`: public behavior, pure transitions, store fencing/recovery, Runner ownership, and compile-time inference.
@@ -74,9 +75,10 @@ Checkpoint operations are leaves: nested checkpoints are rejected. Orchestrate i
 
 - Use standard TC39 decorators, never legacy `experimentalDecorators` or `reflect-metadata`.
 - `DurableJobInputOf` and `DurableJobOutputOf` infer handler types; parameterless durable jobs use `undefined` input.
-- `Execution<T>` remains `PromiseLike`, preserving `id`, `status()`, and `cancel()`.
+- `Execution<T>` remains `PromiseLike`, preserving `id`, `status()`, `history()`, and `cancel()`.
 - `CheckpointContext` is a package-owned, attempt-local DI capability, not an execution handle. User providers must not replace it. Its checkpoint method returns a Runner `Job`.
 - `currentExecution()` exposes execution ID, job name, attempt, and live signal.
+- `ManagerOptions.parentContainer` is a borrowed application container. Attempts are fresh children; Manager never disposes the supplied parent. `manager.provide()` remains attempt-local and overrides inherited providers.
 - Attempt-container disposal must retain the attempt's Runner context after its child Jobs have closed.
 - Admission failures are retained by handles until observation; constructing a handle must not create an unhandled rejection.
 - Equal job/key/input joins the existing execution; differing input raises an identity conflict.
@@ -90,6 +92,9 @@ Checkpoint operations are leaves: nested checkpoints are rejected. Orchestrate i
 
 ### Atomic persistence invariants
 
+- Immutable submissions, semantic ledger events, materialized projections, activation leases, and checkpoint reservations are distinct persisted concepts.
+- Semantic transitions append a contiguous per-execution event and update the materialized projection atomically. Heartbeats and repeated checkpoint reservation/release are operational updates and do not append ledger noise.
+- Ledger replay reconstructs semantic execution and checkpoint state; current leases and running checkpoint reservations are operational overlays.
 - `pending` jobs are claimable only when `availableAt <= now` and their job name is registered.
 - Claim atomically increments attempt and assigns fresh activation ID, worker ID, and lease. One logical job has at most one live stored owner.
 - Mutations validate execution ID + activation ID. Success/failure/checkpoint writes additionally require a live lease. Heartbeat also validates worker ID.
@@ -103,7 +108,7 @@ Checkpoint operations are leaves: nested checkpoints are rejected. Orchestrate i
 - Cancellation can race any final write. A rejected result/failure/release transition must not strand an already-unwound attempt in `cancelling`.
 - Atomic means transaction or compare-and-set, not generic CRUD read/modify/write. Adapter reads must not expose mutable store references.
 
-MemoryStore is a synchronous atomic in-memory reference adapter, not production durability. External effects remain at least once; use unambiguous execution/checkpoint-derived idempotency keys or coordinated transactions. Fencing protects stored state, not outside services.
+MemoryStore and SQLiteAdapter implement the same state machine; SQLiteAdapter persists the semantic ledger, projections, leases, and checkpoints in separate tables. External effects remain at least once; use unambiguous execution/checkpoint-derived idempotency keys or coordinated transactions. Fencing protects stored state, not outside services.
 
 ### Failure and lifecycle
 

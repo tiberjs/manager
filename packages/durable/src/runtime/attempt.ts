@@ -37,12 +37,13 @@ export interface AttemptOptions {
   readonly store: ExecutionStore;
   readonly input: unknown;
   readonly signal: AbortSignal;
+  readonly parentContainer?: Container;
   readonly providers: readonly AttemptProvider[];
 }
 
 /** Wrap one logical job attempt in independently owned Runner and DI boundaries. */
 export async function executeJobAttempt(options: AttemptOptions): Promise<unknown> {
-  const container = new Container();
+  const container = options.parentContainer?.child() ?? new Container();
   for (const provider of options.providers) {
     container.provide(provider.token, provider.factory);
   }

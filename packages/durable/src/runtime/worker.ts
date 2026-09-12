@@ -1,3 +1,4 @@
+import type { Container } from "@tiberjs/di";
 import { randomUUID } from "node:crypto";
 import { ManagerClosedError } from "../errors.js";
 import type { ClaimedExecution, ExecutionStore } from "../persistence/store.js";
@@ -9,6 +10,7 @@ export interface WorkerOptions {
   readonly store: ExecutionStore;
   readonly registry: DurableJobRegistry;
   readonly providers: readonly AttemptProvider[];
+  readonly parentContainer?: Container;
   readonly concurrency: number;
   readonly leaseDurationMs: number;
   readonly pollIntervalMs: number;
@@ -58,6 +60,7 @@ export class DurableWorker {
       store: options.store,
       registry: options.registry,
       providers: options.providers,
+      parentContainer: options.parentContainer,
       workerId: this.workerId,
       leaseDurationMs: this.leaseDurationMs,
       heartbeatIntervalMs: Math.max(1, Math.floor(this.leaseDurationMs / 3)),
@@ -124,7 +127,7 @@ export class DurableWorker {
         }
         if (this.closing) {
           const mutation = {
-            executionId: claimed.execution.id,
+            executionId: claimed.execution.submission.id,
             activationId: claimed.activationId,
             now: Date.now(),
           };
@@ -147,11 +150,13 @@ export class DurableWorker {
     const promise = this.activationRunner
       .run(claimed, controller)
       .catch((error: unknown) => {
-        const previous = this.executionFailures.get(claimed.execution.id);
-        if (!previous || previous.attempt <= claimed.execution.attempt) {
-          this.executionFailures.set(claimed.execution.id, {
+        const executionId = claimed.execution.submission.id;
+        const attempt = claimed.execution.projection.attempt;
+        const previous = this.executionFailures.get(executionId);
+        if (!previous || previous.attempt <= attempt) {
+          this.executionFailures.set(executionId, {
             error,
-            attempt: claimed.execution.attempt,
+            attempt,
           });
         }
       })
@@ -160,7 +165,7 @@ export class DurableWorker {
         this.wakeSignal.wake();
       });
     this.active.set(claimed.activationId, {
-      executionId: claimed.execution.id,
+      executionId: claimed.execution.submission.id,
       controller,
       promise,
     });
