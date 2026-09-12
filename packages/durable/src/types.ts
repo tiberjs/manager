@@ -68,7 +68,8 @@ export type CheckpointRecord = {
   readonly key: string;
   readonly inputFingerprint: string;
 } & (
-  | { readonly status: "running"; readonly activationId?: string }
+  | { readonly status: "pending" }
+  | { readonly status: "running"; readonly activationId: string }
   | { readonly status: "completed"; readonly result: unknown }
 );
 

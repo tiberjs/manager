@@ -71,7 +71,12 @@ export function completeExecution(
   mutation: ExecutionMutation,
   result: unknown,
 ): ExecutionRecord | undefined {
-  if (!ownsExecution(execution, mutation) || execution.status !== "running") return undefined;
+  if (
+    !ownsExecution(execution, mutation) ||
+    execution.status !== "running" ||
+    Object.values(execution.checkpoints).some((checkpoint) => checkpoint.status === "running")
+  )
+    return undefined;
   return inactiveExecution(execution, {
     status: "completed",
     result,
@@ -160,9 +165,13 @@ function inactiveExecution(
 ): ExecutionRecord {
   let checkpoints: Record<string, CheckpointRecord> | undefined;
   for (const [key, checkpoint] of Object.entries(execution.checkpoints)) {
-    if (checkpoint.status === "running" && checkpoint.activationId !== undefined) {
+    if (checkpoint.status === "running") {
       checkpoints ??= { ...execution.checkpoints };
-      checkpoints[key] = { ...checkpoint, activationId: undefined };
+      checkpoints[key] = {
+        key: checkpoint.key,
+        inputFingerprint: checkpoint.inputFingerprint,
+        status: "pending",
+      };
     }
   }
   return {

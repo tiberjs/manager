@@ -82,6 +82,7 @@ describe("MemoryStore job transitions", () => {
     const checkpoint = { ...mutation(active), key: "__proto__", inputFingerprint: "first" };
     await expect(store.beginCheckpoint(checkpoint)).resolves.toEqual({ status: "execute" });
     await expect(store.beginCheckpoint(checkpoint)).resolves.toEqual({ status: "busy" });
+    await expect(store.complete(mutation(active), "premature")).resolves.toBe(false);
     await expect(
       store.beginCheckpoint({ ...checkpoint, inputFingerprint: "different" }),
     ).resolves.toEqual({ status: "conflict" });
@@ -89,6 +90,9 @@ describe("MemoryStore job transitions", () => {
       store.completeCheckpoint({ ...checkpoint, inputFingerprint: "different" }, 42),
     ).resolves.toBe(false);
     await expect(store.releaseCheckpoint(checkpoint)).resolves.toBe(true);
+    const released = await store.load(active.execution.id);
+    expect(released?.status).toBe("running");
+    expect(released?.checkpoints["__proto__"]).toMatchObject({ status: "pending" });
     await expect(
       store.beginCheckpoint({ ...checkpoint, inputFingerprint: "different" }),
     ).resolves.toEqual({ status: "conflict" });

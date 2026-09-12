@@ -321,7 +321,7 @@ describe("durable checkpoints", () => {
     await rejected;
     await expect(store.load(execution.id)).resolves.toMatchObject({
       status: "cancelled",
-      checkpoints: { cancel: { status: "running", activationId: undefined } },
+      checkpoints: { cancel: { status: "pending" } },
     });
   });
 

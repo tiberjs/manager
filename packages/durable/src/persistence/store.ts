@@ -40,7 +40,11 @@ export type BeginCheckpointResult =
   | { readonly status: "completed"; readonly result: unknown }
   | { readonly status: "busy" | "conflict" | "lost" };
 
-/** Atomic job transitions. All returned values must be isolated from stored state. */
+/**
+ * Atomic persisted-execution transitions. Implementations must fence mutations by activation and
+ * enforce the state machine; generic read/modify/write storage is insufficient. Returned values
+ * must be isolated from stored state.
+ */
 export interface ExecutionStore {
   create(record: ExecutionRecord): Promise<CreateExecutionResult>;
   load(id: string): Promise<ExecutionRecord | null>;
@@ -50,6 +54,7 @@ export interface ExecutionStore {
     workerId: string,
     leaseExpiresAt: number,
   ): Promise<HeartbeatResult>;
+  /** Complete a live activation only after it owns no running checkpoint reservation. */
   complete(mutation: ExecutionMutation, result: unknown): Promise<boolean>;
   fail(failure: ExecutionFailure): Promise<boolean>;
   release(mutation: ExecutionMutation): Promise<boolean>;

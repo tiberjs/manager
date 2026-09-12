@@ -67,11 +67,40 @@ describe("immutable job state transitions", () => {
       activationId: undefined,
       checkpoints: {
         done: { status: "completed", result: 42 },
-        unfinished: { status: "running", activationId: undefined },
+        unfinished: { status: "pending" },
       },
     });
     expect(source.checkpoints.unfinished).toMatchObject({ activationId: "activation" });
     expect(source.status).toBe("running");
+  });
+
+  test("completion waits until the activation owns no running checkpoints", () => {
+    const active = claimExecution(pending(), options, "activation");
+    if (!active) throw new Error("Expected claim.");
+    const withCheckpoint: ExecutionRecord = {
+      ...active,
+      checkpoints: {
+        effect: {
+          key: "effect",
+          inputFingerprint: "x",
+          status: "running",
+          activationId: "activation",
+        },
+      },
+    };
+    expect(completeExecution(withCheckpoint, mutation, 42)).toBeUndefined();
+    expect(
+      completeExecution(
+        {
+          ...withCheckpoint,
+          checkpoints: {
+            effect: { key: "effect", inputFingerprint: "x", status: "pending" },
+          },
+        },
+        mutation,
+        42,
+      ),
+    ).toMatchObject({ status: "completed", result: 42 });
   });
 
   test("terminal results cannot be changed by completion or lease recovery", () => {

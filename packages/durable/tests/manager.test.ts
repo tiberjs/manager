@@ -278,6 +278,34 @@ describe("durable Runner jobs", () => {
     expect([constructions, effects, disposals]).toEqual([2, 2, 2]);
   });
 
+  it("persists a genuine Runner child failure as an attempt failure", async () => {
+    let runs = 0;
+    const store = new MemoryStore();
+    const Retried = define(
+      { name: "runner-child-retry", retry: { retries: 1 } },
+      class {
+        run(): number {
+          runs += 1;
+          if (runs === 1) {
+            fork(() => {
+              throw new Error("child failed");
+            });
+            return -1;
+          }
+          return 42;
+        }
+      },
+    );
+    const execution = create(store).wrap(Retried).run(undefined);
+    await expect(execution).resolves.toBe(42);
+    await expect(store.load(execution.id)).resolves.toMatchObject({
+      status: "completed",
+      attempt: 2,
+      failures: 1,
+      result: 42,
+    });
+  });
+
   it("exhausts retries without executing code after the failure", async () => {
     let runs = 0;
     let after = false;

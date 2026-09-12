@@ -17,6 +17,10 @@ export interface JobActivationOptions {
   readonly isClosing: () => boolean;
 }
 
+type AttemptOutcome =
+  | { readonly status: "succeeded"; readonly result: unknown }
+  | { readonly status: "failed"; readonly error: unknown };
+
 /** Executes, heartbeats, and commits one claimed job after Runner teardown. */
 export class JobActivationRunner {
   private readonly options: JobActivationOptions;
@@ -44,25 +48,25 @@ export class JobActivationRunner {
       intervalMs: this.options.heartbeatIntervalMs,
       controller,
     });
-    let result: unknown;
-    let failure: unknown;
-    let failed = false;
+    let outcome: AttemptOutcome;
 
     try {
-      result = await executeJobAttempt({
-        executionId: claimed.execution.id,
-        job: registered.name,
-        activationId: claimed.activationId,
-        store: this.options.store,
-        attempt: claimed.execution.attempt,
-        handler: registered.type,
-        input: claimed.execution.input,
-        signal: controller.signal,
-        providers: this.options.providers,
-      });
+      outcome = {
+        status: "succeeded",
+        result: await executeJobAttempt({
+          executionId: claimed.execution.id,
+          job: registered.name,
+          activationId: claimed.activationId,
+          store: this.options.store,
+          attempt: claimed.execution.attempt,
+          handler: registered.type,
+          input: claimed.execution.input,
+          signal: controller.signal,
+          providers: this.options.providers,
+        }),
+      };
     } catch (error) {
-      failed = true;
-      failure = error;
+      outcome = { status: "failed", error };
     } finally {
       await heartbeat.stop();
     }
@@ -70,14 +74,15 @@ export class JobActivationRunner {
     if (heartbeat.failure) {
       const infrastructureError = heartbeat.failure.error;
       if (
-        failed &&
-        (Object.is(failure, infrastructureError) ||
-          (failure instanceof AggregateError && failure.errors.includes(infrastructureError)))
+        outcome.status === "failed" &&
+        (Object.is(outcome.error, infrastructureError) ||
+          (outcome.error instanceof AggregateError &&
+            outcome.error.errors.includes(infrastructureError)))
       ) {
-        throw failure;
+        throw outcome.error;
       }
       throw combinedError(
-        failed ? [infrastructureError, failure] : [infrastructureError],
+        outcome.status === "failed" ? [infrastructureError, outcome.error] : [infrastructureError],
         "Heartbeat and job teardown failed.",
       );
     }
@@ -98,13 +103,13 @@ export class JobActivationRunner {
     let persisted: boolean;
     if (this.options.isClosing() && controller.signal.aborted) {
       persisted = await this.options.store.release(currentMutation);
-    } else if (!failed) {
-      persisted = await this.options.store.complete(currentMutation, result);
+    } else if (outcome.status === "succeeded") {
+      persisted = await this.options.store.complete(currentMutation, outcome.result);
     } else {
       const failureNumber = claimed.execution.failures + 1;
       persisted = await this.options.store.fail({
         ...currentMutation,
-        error: serializeError(failure),
+        error: serializeError(outcome.error),
         retryAt: retryAt(claimed.execution.retry, failureNumber, now),
       });
     }

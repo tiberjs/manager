@@ -22,7 +22,8 @@ export function beginExecutionCheckpoint(
       return { outcome: { status: "conflict" } };
     if (existing.status === "completed")
       return { outcome: { status: "completed", result: existing.result } };
-    if (existing.activationId === mutation.activationId) return { outcome: { status: "busy" } };
+    if (existing.status === "running" && existing.activationId === mutation.activationId)
+      return { outcome: { status: "busy" } };
   }
   const checkpoint: CheckpointRecord = {
     key: mutation.key,
@@ -74,7 +75,7 @@ export function releaseExecutionCheckpoint(
       [mutation.key]: {
         key: mutation.key,
         inputFingerprint: mutation.inputFingerprint,
-        status: "running",
+        status: "pending",
       },
     },
   };

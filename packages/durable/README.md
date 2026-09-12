@@ -55,6 +55,56 @@ After a worker claims an execution, it starts the lease heartbeat and creates on
 
 `Execution<T>` and `CheckpointContext` are not wrappers around each other. `Manager.run()` returns an `Execution<T>` that only identifies, observes, and cancels the logical stored run. `CheckpointContext` is never returned; the attempt container injects it only while a handler is running, and it uses that attempt's fenced activation to reserve, reuse, and commit checkpoints.
 
+### Persistent state machine
+
+Persistence does not store Runner's `Job` tree or lifecycle. It stores one logical execution and
+the lease that fences its current process-local attempt:
+
+```text
+pending ── claim ──> running ── complete ───────────────> completed
+   │                    │
+   │                    ├── fail / expired lease ───────> pending or failed
+   │                    ├── graceful shutdown release ──> pending
+   │                    └── cancel request ─────────────> cancelling
+   │                                                         │
+   └── cancel ─────────────────────────────────────────> cancelled
+                                                             ▲
+                              teardown acknowledgement / expired lease
+```
+
+`running` means that an activation ID, worker ID, and unexpired lease own the persisted execution;
+it does not mean only that the JavaScript handler body is running. The execution remains `running`
+while Runner joins descendants, DI disposes the attempt container, and durable prepares the final
+atomic write. `cancelling` means the request is durable but the owner has not finished unwinding.
+
+`JobActivationRunner` maps the process-local attempt outcome to that state machine:
+
+| Attempt boundary after Runner and DI teardown | Persisted transition                                                |
+| --------------------------------------------- | ------------------------------------------------------------------- |
+| Resolved                                      | `running → completed`                                               |
+| Genuine failure                               | `running → pending` for retry, otherwise `running → failed`         |
+| Persisted cancellation request                | `cancelling → cancelled`                                            |
+| Manager shutdown abort                        | `running → pending` without consuming retry budget                  |
+| Lost activation or lease                      | No stale write; expiration recovery performs retry/failure          |
+| Heartbeat or store infrastructure failure     | No false success/failure write; surface the error and recover lease |
+
+Every result, failure, and checkpoint mutation compares the execution ID and activation ID.
+Success, failure, and checkpoint writes also require the lease to remain live. A rejected fenced
+write cannot overwrite a newer attempt.
+
+Persisted checkpoint state is separate:
+
+```text
+absent / pending ── reserve for activation ──> running
+       ▲                                          │
+       └── operation failure or cancellation ─────┤
+                                                  └── success ──> completed
+```
+
+`pending` retains the checkpoint key and input fingerprint without an owner. `running` always has
+an activation ID. `completed` retains the cloned result and never changes. An execution cannot
+commit while one of its checkpoints remains `running`.
+
 ## Manage executions
 
 The value returned by `run()` is an awaitable `Execution<T>`, with an ID and controls:
