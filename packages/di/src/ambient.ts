@@ -1,4 +1,5 @@
 import { contextKey, peekState, provide, withContext, type ContextKey } from "@tiberjs/runner";
+import type { RuntimeState } from "@tiberjs/runner";
 import type { Container } from "./container.js";
 import { activeContainer } from "./resources/active-container.js";
 import type { Factory, InjectionToken } from "./tokens.js";
@@ -6,28 +7,78 @@ import type { Factory, InjectionToken } from "./tokens.js";
 /** The execution-context binding that carries a container across executions. */
 export const ContainerKey: ContextKey<Container> = contextKey<Container>("di.container");
 
-/** Construction container first, otherwise the current execution's binding. */
-export function currentContainer(): Container {
+/** The root a host's execution scope is created from. */
+export const scopeRoot: unique symbol = Symbol("di.scope-root");
+/** The execution scope itself, created on the host the first time it is needed. */
+export const executionScope: unique symbol = Symbol("di.execution-scope");
+
+/**
+ * A runner attachment that hosts one execution's scope.
+ *
+ * The host declares `[scopeRoot]`; the scope is `root.child()`, created on
+ * the host by the first `currentContainer()`, `scoped()`, or `onDispose()`
+ * and disposed by whoever owns the host. An execution that only resolves
+ * through `inject()` never creates one. An explicit `ContainerKey` binding
+ * takes precedence over the host.
+ */
+export interface ScopeHost {
+  readonly [scopeRoot]: Container;
+  [executionScope]?: Container;
+}
+
+/** A host is recognized by the declared slot, not by whether a scope exists yet. */
+function hostOf(state: RuntimeState): ScopeHost | undefined {
+  const attachment = state.context.attachment;
+  return typeof attachment === "object" && attachment !== null && scopeRoot in attachment
+    ? (attachment as ScopeHost)
+    : undefined;
+}
+
+function noContainer(): never {
+  throw new Error(
+    "No active container. This API requires construction, disposal, withContainer(), an execution bound to ContainerKey, or a ScopeHost attachment.",
+  );
+}
+
+/**
+ * The container ambient to this call, in precedence order: the one currently
+ * constructing, an explicit `ContainerKey` binding, then the scope host.
+ *
+ * On a host, `create` decides what a missing scope means: a caller that may
+ * register into the container needs the scope to exist; a caller that only
+ * resolves does not, because a scope resolves through its root anyway.
+ */
+function ambientContainer(create: boolean): Container {
   const constructing = activeContainer.getStore();
   if (constructing) {
     return constructing;
   }
-
-  // One state read and one frame walk: inject() runs on request paths, and a
-  // bound container is never undefined, so absence needs no separate probe.
-  const bound = peekState()?.context.values.get(ContainerKey.id) as Container | undefined;
-  if (!bound) {
-    throw new Error(
-      "No active container. This API requires construction, disposal, withContainer(), or an execution bound to ContainerKey.",
-    );
+  const state = peekState();
+  if (!state) {
+    noContainer();
   }
-
-  return bound;
+  const bound = state.context.values.get(ContainerKey.id) as Container | undefined;
+  if (bound) {
+    return bound;
+  }
+  const host = hostOf(state);
+  if (!host) {
+    noContainer();
+  }
+  if (create) {
+    return (host[executionScope] ??= host[scopeRoot].child());
+  }
+  return host[executionScope] ?? host[scopeRoot];
 }
 
-/** Resolve a dependency during construction or inside a bound execution. */
+/** The ambient container, created on a host if it does not exist yet. */
+export function currentContainer(): Container {
+  return ambientContainer(true);
+}
+
+/** Resolve a dependency in the ambient container without creating a host's scope. */
 export function inject<T>(token: InjectionToken<T>): T {
-  return currentContainer().resolve(token);
+  return ambientContainer(false).resolve(token);
 }
 
 /** Acquire a resource once per container and release it when that container closes. */

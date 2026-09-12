@@ -3,11 +3,14 @@
 export {
   ContainerKey,
   currentContainer,
+  executionScope,
   inject,
   onDispose,
   scoped,
+  scopeRoot,
   withContainer,
 } from "./ambient.js";
+export type { ScopeHost } from "./ambient.js";
 export type { ContainerObject } from "./resources/cleanup.js";
 export { Container } from "./container.js";
 export {
