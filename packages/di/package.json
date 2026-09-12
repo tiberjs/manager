@@ -1,6 +1,6 @@
 {
   "name": "@tiberjs/di",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Hierarchical dependency container and resource ownership for tiberjs.",
   "author": "miinhho",
   "type": "module",
