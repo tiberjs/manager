@@ -30,7 +30,6 @@ jobs:
         with:
           node-version: 24.18.0
           cache: pnpm
-      - run: npm install --global npm@^11.5.1
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       # See ci.yml: @tiberjs/durable is excluded until it is migrated to the current runner.
