@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { ManagerClosedError } from "../errors.js";
 import type { ClaimedExecution, ExecutionStore } from "../persistence/store.js";
-import type { JobRegistry } from "../job/registry.js";
+import type { DurableJobRegistry } from "../job/registry.js";
 import type { AttemptProvider } from "./attempt.js";
 import { JobActivationRunner } from "./job-activation.js";
 
 export interface WorkerOptions {
   readonly store: ExecutionStore;
-  readonly registry: JobRegistry;
+  readonly registry: DurableJobRegistry;
   readonly providers: readonly AttemptProvider[];
   readonly concurrency: number;
   readonly leaseDurationMs: number;
@@ -33,7 +33,7 @@ const MANAGER_CLOSED = new ManagerClosedError();
 /** Owns job claiming, local activation concurrency, wakeups, and worker shutdown. */
 export class DurableWorker {
   private readonly store: ExecutionStore;
-  private readonly registry: JobRegistry;
+  private readonly registry: DurableJobRegistry;
   private readonly concurrency: number;
   private readonly leaseDurationMs: number;
   private readonly workerId = randomUUID();

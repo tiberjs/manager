@@ -1,13 +1,13 @@
 import { inject } from "@tiberjs/di";
 import {
   DurableExecution,
-  Job,
-  type Manager,
+  DurableJob,
   type Execution,
-  type WrappedJob,
+  type Manager,
+  type WrappedDurableJob,
 } from "../src/index.js";
 
-@Job("typed-job")
+@DurableJob("typed-job")
 class TypedJob {
   readonly durable = inject(DurableExecution);
   async run(input: { value: number }): Promise<number> {
@@ -15,7 +15,7 @@ class TypedJob {
   }
 }
 
-@Job("no-input")
+@DurableJob("no-input")
 class NoInput {
   run(): string {
     return "done";
@@ -23,7 +23,7 @@ class NoInput {
 }
 
 function jobTypeContract(manager: Manager): Execution<number> {
-  const wrapped: WrappedJob<{ value: number }, number> = manager.wrap(TypedJob);
+  const wrapped: WrappedDurableJob<{ value: number }, number> = manager.wrap(TypedJob);
   const result: Execution<number> = wrapped.run({ value: 42 });
   const resumed: Execution<number> = wrapped.get(result.id);
   const noInput: Execution<string> = manager.wrap(NoInput).run(undefined);

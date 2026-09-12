@@ -34,7 +34,7 @@ There is no packed-artifact override any more; every runner dependency resolves 
 ### Package boundary
 
 - `packages/durable/src/manager.ts`: registration, typed `wrap()`/`run()`/`get()`, handles, and lifecycle facade.
-- `packages/durable/src/job/definition.ts`: standard `@Job` metadata and stable names.
+- `packages/durable/src/job/definition.ts`: standard `@DurableJob` metadata and stable names.
 - `packages/durable/src/job/registry.ts`: atomic registration, retry defaults, and handler lookup; never constructs handlers.
 - `packages/durable/src/execution/handle.ts`: awaitable execution handle.
 - `packages/durable/src/execution/record.ts`: input snapshot, identity/fingerprint, initial state and retry precedence.
@@ -62,7 +62,7 @@ Runner  → one attempt's execution context, child Jobs, and cooperative cancell
 DI      → one attempt's dependency construction, caching, and cleanup
 ```
 
-A job is a reconstructable class with a `run(input)` method and a stable `@Job` name. `wrap(Type)` binds a class to a manager; it does not serialize code or closures. Input is cloned synchronously at submission. No required base class and no graph compilation.
+A durable job is a reconstructable class with a `run(input)` method and a stable `@DurableJob` name. `wrap(Type)` binds the definition to a manager; it does not serialize code or closures. A Runner `Job` exists only for one process-local attempt or child operation. Input is cloned synchronously at submission. No required base class and no graph compilation.
 
 On recovery the handler starts at entry. Only successful persisted checkpoints skip operations; local variables, closures, ordinary promises, sleeps, resources, and forked tasks are ephemeral. Do not claim automatic deterministic replay, instruction-level resume, production persistence from MemoryStore, or exactly-once external effects.
 
@@ -73,7 +73,7 @@ Checkpoint operations are leaves: nested checkpoints are rejected. Orchestrate i
 ### Public contracts
 
 - Use standard TC39 decorators, never legacy `experimentalDecorators` or `reflect-metadata`.
-- `JobInputOf` and `JobOutputOf` infer handler types; parameterless jobs use `undefined` input.
+- `DurableJobInputOf` and `DurableJobOutputOf` infer handler types; parameterless durable jobs use `undefined` input.
 - `Execution<T>` remains `PromiseLike`, preserving `id`, `status()`, and `cancel()`.
 - `DurableExecution` is a package-owned DI token; user providers must not replace its attempt-local service. Its checkpoint method returns a Runner `Job`.
 - `currentExecution()` exposes execution ID, job name, attempt, and live signal.
@@ -84,7 +84,7 @@ Checkpoint operations are leaves: nested checkpoints are rejected. Orchestrate i
 - Retry precedence is manager defaults < job options < execution options, field by field.
 - Worker concurrency bounds jobs, not ordinary forked tasks or individual checkpoints.
 - Inputs/results must support structured cloning plus the configured store's serialization constraints.
-- Job names and checkpoint keys/schemas are durable identities. Use a new job name for incompatible code/schema changes; retain old registered handlers until old jobs drain.
+- Durable job names and checkpoint keys/schemas are persistent identities. Use a new durable job name for incompatible code/schema changes; retain old registered definitions until old executions drain.
 - The former graph API/record format is removed. Do not introduce compatibility aliases or silently reinterpret old records.
 - The package rename from `@tiberjs/manager` to `@tiberjs/durable` is a clean cutover. Do not publish an alias package or re-export shim.
 

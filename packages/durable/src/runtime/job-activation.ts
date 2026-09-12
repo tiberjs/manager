@@ -2,14 +2,14 @@ import { combinedError } from "@tiberjs/runner";
 import { serializeError } from "../errors.js";
 import { retryAt } from "../execution/retry.js";
 import type { ClaimedExecution, ExecutionStore, ExecutionMutation } from "../persistence/store.js";
-import type { JobRegistry } from "../job/registry.js";
+import type { DurableJobRegistry } from "../job/registry.js";
 import { executeJobAttempt } from "./attempt.js";
 import type { AttemptProvider } from "./attempt.js";
 import { ActivationLease } from "./lease.js";
 
 export interface JobActivationOptions {
   readonly store: ExecutionStore;
-  readonly registry: JobRegistry;
+  readonly registry: DurableJobRegistry;
   readonly providers: readonly AttemptProvider[];
   readonly workerId: string;
   readonly leaseDurationMs: number;

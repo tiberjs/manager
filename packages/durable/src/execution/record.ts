@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { serialize } from "node:v8";
 import type { ExecutionOptions, ExecutionRecord } from "../types.js";
-import type { RegisteredJob } from "../job/registry.js";
+import type { RegisteredDurableJob } from "../job/registry.js";
 import { normalizePolicy } from "./retry.js";
 
 export function createExecutionRecord(
-  job: RegisteredJob,
+  job: RegisteredDurableJob,
   input: unknown,
   options: ExecutionOptions,
   now: number,

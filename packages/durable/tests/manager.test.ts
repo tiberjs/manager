@@ -2,12 +2,12 @@ import { inject, onDispose, token } from "@tiberjs/di";
 import { fork, signal } from "@tiberjs/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  DurableExecution,
   DuplicateJobError,
+  DurableExecution,
+  DurableJob,
   ExecutionCancelledError,
-  ExecutionIdentityConflictError,
   ExecutionFailedError,
-  Job,
+  ExecutionIdentityConflictError,
   Manager,
   MemoryStore,
   createManager,
@@ -16,9 +16,9 @@ import {
 import type {
   ClaimedExecution,
   ClaimExecutionOptions,
+  DurableJobConstructor,
+  DurableJobOptions,
   ExecutionMutation,
-  JobConstructor,
-  JobOptions,
   ManagerOptions,
 } from "../src/index.js";
 
@@ -34,8 +34,11 @@ function create(store = new MemoryStore(), options: Partial<ManagerOptions> = {}
   managers.push(manager);
   return manager;
 }
-function define<Value extends JobConstructor>(options: string | JobOptions, type: Value): Value {
-  Job(options)(type, {} as ClassDecoratorContext<Value>);
+function define<Value extends DurableJobConstructor>(
+  options: string | DurableJobOptions,
+  type: Value,
+): Value {
+  DurableJob(options)(type, {} as ClassDecoratorContext<Value>);
   return type;
 }
 function untilAborted(): Promise<never> {

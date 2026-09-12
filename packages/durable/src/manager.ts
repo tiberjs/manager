@@ -14,17 +14,17 @@ import { normalizePolicy } from "./execution/retry.js";
 import type { ExecutionStore } from "./persistence/store.js";
 import { terminal } from "./persistence/store.js";
 import type {
+  DurableJobConstructor,
+  DurableJobInputOf,
+  DurableJobOutputOf,
   Execution,
   ExecutionOptions,
   ExecutionRecord,
   RetryPolicy,
-  JobConstructor,
-  JobInputOf,
-  JobOutputOf,
-  WrappedJob,
+  WrappedDurableJob,
 } from "./types.js";
 import { DurableWorker } from "./runtime/worker.js";
-import { JobRegistry } from "./job/registry.js";
+import { DurableJobRegistry } from "./job/registry.js";
 
 export interface ManagerOptions {
   readonly store: ExecutionStore;
@@ -41,7 +41,7 @@ const MANAGER_CLOSED = new ManagerClosedError();
 export class Manager implements ExecutionHost, AsyncDisposable {
   private readonly store: ExecutionStore;
   private readonly autoStart: boolean;
-  private readonly registry: JobRegistry;
+  private readonly registry: DurableJobRegistry;
   private readonly providers: AttemptProvider[] = [];
   private readonly worker: DurableWorker;
   private readonly submissions = new Set<Promise<unknown>>();
@@ -51,7 +51,7 @@ export class Manager implements ExecutionHost, AsyncDisposable {
   constructor(options: ManagerOptions) {
     this.store = options.store;
     this.autoStart = options.autoStart ?? true;
-    this.registry = new JobRegistry(normalizePolicy(options.retry));
+    this.registry = new DurableJobRegistry(normalizePolicy(options.retry));
     this.worker = new DurableWorker({
       store: options.store,
       registry: this.registry,
@@ -68,7 +68,7 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     return this;
   }
 
-  register(...types: JobConstructor[]): this {
+  register(...types: DurableJobConstructor[]): this {
     this.assertOpen();
     if (this.registry.register(types)) {
       this.worker.wake();
@@ -76,7 +76,9 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     return this;
   }
 
-  wrap<Job extends JobConstructor>(type: Job): WrappedJob<JobInputOf<Job>, JobOutputOf<Job>> {
+  wrap<Definition extends DurableJobConstructor>(
+    type: Definition,
+  ): WrappedDurableJob<DurableJobInputOf<Definition>, DurableJobOutputOf<Definition>> {
     this.register(type);
     return {
       run: (input, options) => this.run(type, input, options),
@@ -84,11 +86,11 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     };
   }
 
-  run<Job extends JobConstructor>(
-    type: Job,
-    input: JobInputOf<Job>,
+  run<Definition extends DurableJobConstructor>(
+    type: Definition,
+    input: DurableJobInputOf<Definition>,
     options: ExecutionOptions = {},
-  ): Execution<JobOutputOf<Job>> {
+  ): Execution<DurableJobOutputOf<Definition>> {
     this.assertOpen();
     const registered = this.registry.get(type);
     const record = createExecutionRecord(registered, input, options, Date.now());
@@ -110,7 +112,10 @@ export class Manager implements ExecutionHost, AsyncDisposable {
     return new ManagedExecution(record.id, this, ready);
   }
 
-  get<Job extends JobConstructor>(type: Job, id: string): Execution<JobOutputOf<Job>> {
+  get<Definition extends DurableJobConstructor>(
+    type: Definition,
+    id: string,
+  ): Execution<DurableJobOutputOf<Definition>> {
     this.assertOpen();
     const registered = this.registry.get(type);
     const ready = this.load(id).then((execution) => {

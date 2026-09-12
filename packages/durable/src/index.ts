@@ -24,7 +24,7 @@ export type {
   ExecutionFailure,
   ExecutionMutation,
 } from "./persistence/store.js";
-export { Job } from "./job/definition.js";
+export { DurableJob } from "./job/definition.js";
 export type {
   CheckpointRecord,
   Execution,
@@ -32,13 +32,13 @@ export type {
   ExecutionOptions,
   ExecutionRecord,
   ExecutionStatus,
-  JobConstructor,
-  JobHandler,
-  JobInputOf,
-  JobOptions,
-  JobOutputOf,
+  DurableJobConstructor,
+  DurableJobHandler,
+  DurableJobInputOf,
+  DurableJobOptions,
+  DurableJobOutputOf,
   RetryPolicy,
   SerializedError,
   StoredRetryPolicy,
-  WrappedJob,
+  WrappedDurableJob,
 } from "./types.js";

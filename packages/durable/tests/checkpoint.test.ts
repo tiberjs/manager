@@ -1,12 +1,22 @@
 import { inject } from "@tiberjs/di";
 import { execute, fork, signal } from "@tiberjs/runner";
 import { afterEach, describe, expect, it } from "vitest";
-import { DurableExecution, Job, Manager, MemoryStore, currentExecution } from "../src/index.js";
-import type { BeginCheckpointResult, CheckpointMutation, JobConstructor } from "../src/index.js";
+import {
+  DurableExecution,
+  DurableJob,
+  Manager,
+  MemoryStore,
+  currentExecution,
+} from "../src/index.js";
+import type {
+  BeginCheckpointResult,
+  CheckpointMutation,
+  DurableJobConstructor,
+} from "../src/index.js";
 
 const managers: Manager[] = [];
-function wrap<Value extends JobConstructor>(type: Value, store = new MemoryStore()) {
-  Job("checkpoint-test")(type, {} as ClassDecoratorContext<Value>);
+function wrap<Value extends DurableJobConstructor>(type: Value, store = new MemoryStore()) {
+  DurableJob("checkpoint-test")(type, {} as ClassDecoratorContext<Value>);
   const manager = new Manager({ store, pollIntervalMs: 2, leaseDurationMs: 1000 });
   managers.push(manager);
   return manager.wrap(type);

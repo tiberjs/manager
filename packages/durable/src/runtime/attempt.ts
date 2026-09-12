@@ -10,7 +10,7 @@ import {
   signal,
 } from "@tiberjs/runner";
 import type { RuntimeState } from "@tiberjs/runner";
-import type { ExecutionInfo, JobConstructor } from "../types.js";
+import type { DurableJobConstructor, ExecutionInfo } from "../types.js";
 import type { ExecutionStore } from "../persistence/store.js";
 import { CheckpointRuntime, DurableExecution } from "./checkpoint.js";
 
@@ -28,12 +28,12 @@ export interface AttemptProvider<T = unknown> {
   readonly factory: Factory<T>;
 }
 
-export interface JobAttempt {
+export interface AttemptOptions {
   readonly executionId: string;
   readonly job: string;
   readonly activationId: string;
   readonly attempt: number;
-  readonly handler: JobConstructor;
+  readonly handler: DurableJobConstructor;
   readonly store: ExecutionStore;
   readonly input: unknown;
   readonly signal: AbortSignal;
@@ -41,7 +41,7 @@ export interface JobAttempt {
 }
 
 /** Wrap one logical job attempt in independently owned Runner and DI boundaries. */
-export async function executeJobAttempt(options: JobAttempt): Promise<unknown> {
+export async function executeJobAttempt(options: AttemptOptions): Promise<unknown> {
   const container = new Container();
   for (const provider of options.providers) {
     container.provide(provider.token, provider.factory);

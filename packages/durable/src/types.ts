@@ -35,21 +35,23 @@ export interface ExecutionOptions {
   readonly retry?: RetryPolicy;
 }
 
-export interface JobOptions {
+export interface DurableJobOptions {
   readonly name: string;
   readonly retry?: RetryPolicy;
 }
 
-export interface JobHandler<Input, Output> {
+export interface DurableJobHandler<Input, Output> {
   run(input: Input): Output | PromiseLike<Output>;
 }
 
-export type JobConstructor = new () => JobHandler<never, unknown>;
-export type JobInputOf<Job extends JobConstructor> =
-  Parameters<InstanceType<Job>["run"]> extends []
+export type DurableJobConstructor = new () => DurableJobHandler<never, unknown>;
+export type DurableJobInputOf<Definition extends DurableJobConstructor> =
+  Parameters<InstanceType<Definition>["run"]> extends []
     ? undefined
-    : Parameters<InstanceType<Job>["run"]>[0];
-export type JobOutputOf<Job extends JobConstructor> = Awaited<ReturnType<InstanceType<Job>["run"]>>;
+    : Parameters<InstanceType<Definition>["run"]>[0];
+export type DurableJobOutputOf<Definition extends DurableJobConstructor> = Awaited<
+  ReturnType<InstanceType<Definition>["run"]>
+>;
 
 export interface Execution<T> extends PromiseLike<T> {
   readonly id: string;
@@ -57,7 +59,7 @@ export interface Execution<T> extends PromiseLike<T> {
   cancel(reason?: unknown): Promise<void>;
 }
 
-export interface WrappedJob<Input, Output> {
+export interface WrappedDurableJob<Input, Output> {
   run(input: Input, options?: ExecutionOptions): Execution<Output>;
   get(id: string): Execution<Output>;
 }

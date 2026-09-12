@@ -14,13 +14,13 @@ pnpm add @tiberjs/durable @tiberjs/di @tiberjs/runner
 
 ## Quick start
 
-Add `@Job` to a class with a `run(input)` method, then wrap it with a manager:
+Add `@DurableJob` to a class with a `run(input)` method, then wrap it with a manager:
 
 ```ts
 import { fork } from "@tiberjs/runner";
-import { Job, MemoryStore, createManager } from "@tiberjs/durable";
+import { DurableJob, MemoryStore, createManager } from "@tiberjs/durable";
 
-@Job({ name: "research:v1", retry: { retries: 3, delayMs: 250 } })
+@DurableJob({ name: "research:v1", retry: { retries: 3, delayMs: 250 } })
 class Research {
   async run(input: { query: string }): Promise<string> {
     const results = await Promise.all([
@@ -41,6 +41,17 @@ console.log(await execution);
 
 `wrap()` registers the handler and infers its input and result types. `run()` starts the local worker automatically; `concurrency` limits the number of active jobs. Each attempt owns a fresh DI container for its handler and manager-provided dependencies. Runner owns its execution context, cancellation, and descendants; container cleanup completes before the result is committed.
 
+### Execution model
+
+| Concept         | Lifetime and owner                                                                                               |
+| --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `@DurableJob`   | Reconstructable handler definition registered in every worker; its stable name is the persisted identity.        |
+| `Execution<T>`  | Store-backed logical run that can span process restarts and multiple attempts.                                   |
+| Runner `Job<T>` | Process-local structured-concurrency boundary for one attempt, forked operation, or checkpoint; never persisted. |
+| DI `Container`  | Fresh for one attempt; owns the handler, resolved providers, and LIFO cleanup.                                   |
+
+After a worker claims an execution, it starts the lease heartbeat and creates one Runner Job with the claim's abort signal. The Job attachment carries durable execution metadata, while `ContainerKey` binds the attempt container to the Job and every descendant. Runner joins the handler's child Jobs first; durable then disposes the container inside the captured Runner context, stops the heartbeat, and finally performs the fenced completion, failure, cancellation acknowledgement, or shutdown release.
+
 ## Manage executions
 
 The value returned by `run()` is an awaitable `Execution<T>`, with an ID and controls:
@@ -56,7 +67,7 @@ The optional `key` prevents duplicate submissions within a job name. Submitting 
 
 ### Retries
 
-`retries: 3` permits the initial attempt plus three retries. Set defaults on the manager, override them in `@Job`, or override them for one execution:
+`retries: 3` permits the initial attempt plus three retries. Set defaults on the manager, override them in `@DurableJob`, or override them for one execution:
 
 ```ts
 const result = await research.run(
@@ -74,9 +85,9 @@ Inject `DurableExecution` and wrap an operation in `checkpoint(key, input, opera
 ```ts
 import { inject } from "@tiberjs/di";
 import { signal } from "@tiberjs/runner";
-import { DurableExecution, Job } from "@tiberjs/durable";
+import { DurableExecution, DurableJob } from "@tiberjs/durable";
 
-@Job({ name: "page-length:v1", retry: { retries: 2 } })
+@DurableJob({ name: "page-length:v1", retry: { retries: 2 } })
 class PageLength {
   readonly durable = inject(DurableExecution);
 
